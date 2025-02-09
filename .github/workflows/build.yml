@@ -16,7 +16,7 @@ jobs:
       # Make sure Electron Builder can publish to GitHub Releases.
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       # Publish if the ref is a tag (like "v1.0.0"), otherwise do not publish.
-      PUBLISH_FLAG: "${{ startsWith(github.ref, 'refs/tags/v') ? 'always' : 'never' }}"
+      PUBLISH_FLAG: ${{ startsWith(github.ref, 'refs/tags/v') && 'always' || 'never' }}
     strategy:
       matrix:
         os: [macos-latest, ubuntu-latest, windows-latest]
