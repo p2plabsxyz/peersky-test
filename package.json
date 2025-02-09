@@ -44,7 +44,10 @@
       "target": [
         {
           "target": "default",
-          "arch": "universal"
+          "arch": [
+            "x64",
+            "arm64"
+          ]
         }
       ],
       "icon": "./public/icon.png"
@@ -70,11 +73,16 @@
     },
     "linux": {
       "artifactName": "${name}-${version}-${os}-${arch}.${ext}",
-      "target": [
-        "AppImage",
-        "deb"
+      "executableArgs": [
+        "--enable-accelerated-video"
       ],
-      "icon": "./public/icon.png"
+      "target": [
+        "deb",
+        "AppImage",
+        "apk",
+        "pacman"
+      ],
+      "category": "Network;FileTransfer:P2P"
     },
     "protocols": [
       {
