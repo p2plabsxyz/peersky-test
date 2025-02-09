@@ -41,7 +41,7 @@
       "artifactName": "${name}-${version}-${os}-${arch}.${ext}",
       "target": [
         {
-          "target": "default",
+          "target": "dmg",
           "arch": [
             "universal"
           ]
