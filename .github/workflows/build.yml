@@ -35,12 +35,13 @@ jobs:
         with:
           node-version: 'lts/*'
 
+      - name: Non-tag specific build step
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: echo "This build was triggered without a tag."
+
       - name: Build binaries with electron-builder
         uses: coparse-inc/action-electron-builder@29a7606c7d726b5b0f4dc2f334026f58bea0e1bb # v1.6.0 but safer than a tag that can be changed
         with:
           max_attempts: 2
-          # GH token for attaching atrifacts to release draft on tag build
           github_token: ${{ secrets.github_token }}
-          # If the commit is tagged with a version (e.g. "v1.0.0"),
-          # release the app after building
           release: ${{ startsWith(github.ref, 'refs/tags/v') }}
