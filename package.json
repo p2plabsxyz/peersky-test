@@ -43,7 +43,8 @@
         {
           "target": "default",
           "arch": [
-            "universal"
+            "x64",
+            "arm64"
           ]
         }
       ],
@@ -68,8 +69,8 @@
         "apk",
         "pacman"
       ],
-      "category": "Network;FileTransfer:P2P",
-      "icon": "./public/icon.png"
+      "category": "Network;WebBrowser",
+      "icon": "./public/512x512.png"
     },
     "protocols": [
       {
@@ -123,7 +124,7 @@
     "web3protocol": "^0.6.0"
   },
   "devDependencies": {
-    "electron": "^31.3.0",
-    "electron-builder": "^24.13.3"
+    "electron": "^29.0.0",
+    "electron-builder": "^24.0.0"
   }
 }
