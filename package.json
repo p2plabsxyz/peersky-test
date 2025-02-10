@@ -42,11 +42,12 @@
       "target": [
         {
           "target": "default",
-          "arch": ["arm64",
-            "x86_64"
+          "arch": [
+            "universal"
           ]
         }
       ],
+      "mergeASARs": false,
       "icon": "./public/icon.png"
     },
     "win": {
