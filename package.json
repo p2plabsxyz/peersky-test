@@ -26,12 +26,6 @@
     "buildDependenciesFromSource": true,
     "npmRebuild": true,
     "asar": true,
-    "asarUnpack": [
-      "src/**",
-      "node_modules/**",
-      "public/icon.png",
-      "package.json"
-    ],
     "appId": "peersky.p2plabs.xyz",
     "productName": "Peersky Browser",
     "directories": {
@@ -49,7 +43,8 @@
       "target": [
         {
           "target": "default",
-          "arch": ["universal"
+          "arch": [
+            "universal"
           ]
         }
       ],
@@ -71,7 +66,8 @@
         "deb",
         "AppImage",
         "apk",
-        "pacman"
+        "pacman",
+        "snap"
       ],
       "category": "Network;WebBrowser"
     },
@@ -157,7 +153,7 @@
     "web3protocol": "^0.6.0"
   },
   "devDependencies": {
-    "electron": "^34.0.2",
-    "electron-builder": "^25.1.8"
+    "electron": "^31.3.0",
+    "electron-builder": "^24.13.3"
   }
 }
