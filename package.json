@@ -1,6 +1,6 @@
 {
   "name": "peersky-browser",
-  "version": "1.0.0-beta.2",
+  "version": "1.0.0-beta.1",
   "description": "A minimal local-first p2p web browser: access, communicate, and publish offline.",
   "keywords": [
     "peersky",
@@ -26,6 +26,12 @@
     "buildDependenciesFromSource": true,
     "npmRebuild": true,
     "asar": true,
+    "asarUnpack": [
+      "src/**",
+      "node_modules/**",
+      "public/icon.png",
+      "package.json"
+    ],
     "appId": "peersky.p2plabs.xyz",
     "productName": "Peersky Browser",
     "directories": {
@@ -43,7 +49,10 @@
       "target": [
         {
           "target": "default",
-          "arch": [ "x64", "arm64" ]
+          "arch": [
+            "x64",
+            "arm64"
+          ]
         }
       ],
       "icon": "./public/icon.png"
@@ -64,7 +73,9 @@
         "deb",
         "AppImage",
         "apk",
-        "pacman"      ],
+        "pacman",
+        "snap"
+      ],
       "category": "Network;WebBrowser"
     },
     "protocols": [
@@ -149,7 +160,7 @@
     "web3protocol": "^0.6.0"
   },
   "devDependencies": {
-		"electron": "^29.0.1",
-		"electron-builder": "^24.12.0"  
+    "electron": "^29.0.1",
+    "electron-builder": "^24.12.0"
   }
 }
