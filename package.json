@@ -23,8 +23,15 @@
     "postinstall": "electron-builder install-app-deps"
   },
   "build": {
+    "buildDependenciesFromSource": true,
     "npmRebuild": true,
     "asar": true,
+    "asarUnpack": [
+      "src/**",
+      "node_modules/**",
+      "public/icon.png",
+      "package.json"
+    ],
     "appId": "peersky.p2plabs.xyz",
     "productName": "Peersky Browser",
     "directories": {
@@ -42,7 +49,8 @@
       "target": [
         {
           "target": "default",
-          "arch": [ "x64", "arm64" ]
+          "arch": ["universal"
+          ]
         }
       ],
       "icon": "./public/icon.png"
@@ -63,7 +71,8 @@
         "deb",
         "AppImage",
         "apk",
-        "pacman"      ],
+        "pacman"
+      ],
       "category": "Network;WebBrowser"
     },
     "protocols": [
@@ -148,6 +157,7 @@
     "web3protocol": "^0.6.0"
   },
   "devDependencies": {
-		"electron": "^29.0.1",
-		"electron-builder": "^24.12.0"  }
+    "electron": "^34.0.2",
+    "electron-builder": "^25.1.8"
+  }
 }
