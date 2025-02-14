@@ -1,7 +1,7 @@
 {
   "name": "peersky-browser",
-  "version": "1.0.0",
-  "description": "A minimal p2p web browser.",
+  "version": "1.0.0-beta.1",
+  "description": "A minimal local-first p2p web browser: access, communicate, and publish offline.",
   "keywords": [
     "peersky",
     "ipfs",
@@ -14,7 +14,7 @@
   "author": "Akhilesh Thite <akhileshthite@hotmail.com> (https://akhilesh.art/)",
   "main": "src/main.js",
   "type": "module",
-  "repository": "https://github.com/p2plabsxyz/peersky-test",
+  "repository": "https://github.com/p2plabsxyz/peersky-browser",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "electron .",
@@ -43,8 +43,7 @@
         {
           "target": "default",
           "arch": [
-            "x64",
-            "arm64"
+            "universal"
           ]
         }
       ],
@@ -66,12 +65,20 @@
         "deb",
         "AppImage",
         "apk",
-        "pacman"
+        "pacman",
+        "snap"
       ],
-      "category": "Network;WebBrowser",
-      "icon": "./public/512x512.png"
+      "category": "Network;WebBrowser"
     },
     "protocols": [
+      {
+        "name": "webpages",
+        "schemes": [
+          "http",
+          "https"
+        ],
+        "role": "Viewer"
+      },
       {
         "name": "ipfs",
         "schemes": [
@@ -80,13 +87,28 @@
           "ipld"
         ],
         "role": "Viewer"
+      },
+      {
+        "name": "hyper",
+        "schemes": [
+          "hyper",
+          "dat"
+        ],
+        "role": "Viewer"
+      },
+      {
+        "name": "web3",
+        "schemes": [
+          "web3"
+        ],
+        "role": "Viewer"
       }
     ],
     "publish": [
       {
         "provider": "github",
         "owner": "p2plabsxyz",
-        "repo": "peersky-test",
+        "repo": "peersky-browser",
         "releaseType": "release"
       }
     ]
@@ -98,6 +120,8 @@
     "@helia/ipns": "^8.1.0",
     "@helia/unixfs": "^3.0.6",
     "@libp2p/bootstrap": "^10.0.24",
+    "@libp2p/circuit-relay-v2": "^3.1.12",
+    "@libp2p/identify": "^3.0.18",
     "@libp2p/kad-dht": "^12.0.17",
     "@libp2p/mdns": "^11.0.8",
     "@libp2p/mplex": "^10.0.24",
@@ -105,25 +129,30 @@
     "@libp2p/tcp": "^9.0.26",
     "@libp2p/webrtc": "^4.0.33",
     "@libp2p/websockets": "^8.0.24",
+    "b4a": "^1.6.7",
     "content-hash": "^2.5.2",
     "content-type": "^1.0.5",
+    "electron-log": "^5.3.0",
     "electron-updater": "^6.2.1",
     "ethers": "^6.13.4",
     "find-process": "^1.4.7",
     "fs-extra": "^11.2.0",
     "helia": "^5.2.0",
-    "hyper-sdk": "^5.0.0",
+    "hyper-sdk": "^5.1.0",
+    "hypercore-crypto": "^3.4.2",
     "hypercore-fetch": "^9.9.1",
+    "hyperdht": "^6.20.1",
+    "hyperswarm": "^4.8.4",
     "jquery": "^3.7.1",
     "libp2p": "^1.6.0",
     "libp2p-gossipsub": "^0.13.0",
     "mime-types": "^2.1.35",
-    "multiformats": "^13.1.0",
+    "multiformats": "^13.3.2",
     "node-cache": "^5.1.2",
     "web3protocol": "^0.6.0"
   },
   "devDependencies": {
-    "electron": "^34.1.1",
-    "electron-builder": "^25.1.8"
+    "electron": "^31.3.0",
+    "electron-builder": "^24.13.3"
   }
 }
