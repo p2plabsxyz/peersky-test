@@ -65,8 +65,7 @@
         "deb",
         "AppImage",
         "apk",
-        "pacman",
-        "snap"
+        "pacman"
       ],
       "category": "Network;WebBrowser"
     },
