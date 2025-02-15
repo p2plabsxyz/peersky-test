@@ -23,16 +23,10 @@
     "postinstall": "electron-builder install-app-deps"
   },
   "build": {
+    "afterSign": "./mac-build.js",
     "buildDependenciesFromSource": true,
     "npmRebuild": true,
     "asar": true,
-    "asarUnpack": [
-      "src/**",
-      "node_modules/**",
-      "public/icon.png",
-      "package.json"
-    ],
-    "afterSign": "./mac-build.js",
     "appId": "peersky.p2plabs.xyz",
     "productName": "Peersky Browser",
     "directories": {
