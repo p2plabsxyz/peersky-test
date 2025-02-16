@@ -40,15 +40,13 @@
     "mac": {
       "artifactName": "${name}-${version}-${os}-${arch}.${ext}",
       "target": [
-        {
-          "target": "default",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
-        }
+        "dmg",
+        "pkg",
+        "zip"
       ],
-      "icon": "./public/icon.png"
+      "mergeASARs": false,
+      "icon": "./public/icon.png",
+      "hardenedRuntime": true
     },
     "win": {
       "target": [
