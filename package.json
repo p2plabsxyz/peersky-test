@@ -20,10 +20,9 @@
     "start": "electron .",
     "build": "electron-builder build --publish never",
     "build-all": "electron-builder build -mwl",
-    "postinstall": "electron-builder install-app-deps"
+    "postinstall": "npx electron-rebuild --arch=x64 --force && electron-builder install-app-deps"
   },
   "build": {
-    "buildDependenciesFromSource": true,
     "npmRebuild": true,
     "asar": true,
     "appId": "peersky.p2plabs.xyz",
