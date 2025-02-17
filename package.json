@@ -14,15 +14,16 @@
   "author": "Akhilesh Thite <akhileshthite@hotmail.com> (https://akhilesh.art/)",
   "main": "src/main.js",
   "type": "module",
-  "repository": "https://github.com/p2plabsxyz/peersky-test",
+  "repository": "https://github.com/p2plabsxyz/peersky-browser",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "electron .",
     "build": "electron-builder build --publish never",
     "build-all": "electron-builder build -mwl",
-    "postinstall": "patch-package && electron-rebuild --force && electron-builder install-app-deps"
+    "postinstall": "patch-package && electron-builder install-app-deps"
   },
   "build": {
+    "buildDependenciesFromSource": true,
     "npmRebuild": true,
     "asar": true,
     "appId": "peersky.p2plabs.xyz",
@@ -108,7 +109,7 @@
       {
         "provider": "github",
         "owner": "p2plabsxyz",
-        "repo": "peersky-test",
+        "repo": "peersky-browser",
         "releaseType": "release"
       }
     ]
@@ -154,7 +155,6 @@
   "devDependencies": {
     "electron": "^29.0.1",
     "electron-builder": "^24.12.0",
-    "electron-rebuild": "^3.2.9",
     "patch-package": "^8.0.0"
   }
 }
