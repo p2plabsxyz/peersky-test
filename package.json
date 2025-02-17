@@ -20,11 +20,18 @@
     "start": "electron .",
     "build": "electron-builder build --publish never",
     "build-all": "electron-builder build -mwl",
-    "postinstall": "patch-package && npm rebuild node-datachannel --build-from-source && electron-builder install-app-deps"  },
+    "postinstall": "patch-package && export npm_config_arch=x64 && npm rebuild node-datachannel --build-from-source && electron-builder install-app-deps"
   },
   "build": {
+    "buildDependenciesFromSource": true,
     "npmRebuild": true,
     "asar": true,
+    "asarUnpack": [
+      "src/**",
+      "node_modules/**",
+      "public/icon.png",
+      "package.json"
+    ],
     "appId": "peersky.p2plabs.xyz",
     "productName": "Peersky Browser",
     "directories": {
