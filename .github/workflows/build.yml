@@ -1,10 +1,8 @@
-# https://github.com/AgregoreWeb/agregore-browser/blob/master/.github/workflows/build.yml
-
 name: Build/release
 
 on:
   push:
-    ## Run on tags starting with `v*`
+    # Run on tags starting with `v*`
     tags:
       - 'v*'
 
@@ -35,10 +33,25 @@ jobs:
         with:
           node-version: 'lts/*'
 
+      - name: Install build tools (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          xcode-select --install
+          brew install python@3.13  # Install python to fix distutils issue on macOS
+
+      - name: Install build tools (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          npm install --global windows-build-tools
+
       - name: Non-tag specific build step
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         run: echo "This build was triggered without a tag."
 
+      - name: Install dependencies with --build-from-source
+        run: |
+          npm install --build-from-source
+          
       - name: Build binaries with electron-builder
         uses: coparse-inc/action-electron-builder@29a7606c7d726b5b0f4dc2f334026f58bea0e1bb # v1.6.0 but safer than a tag that can be changed
         with:
