@@ -5,7 +5,6 @@ on:
     # Run on tags starting with `v*`
     tags:
       - 'v*'
-
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
@@ -13,47 +12,60 @@ jobs:
   release:
     continue-on-error: true
     runs-on: ${{ matrix.os }}
+    env:
+      # Force npm to always build native modules from source
+      npm_config_build_from_source: true
 
     strategy:
       matrix:
         os: [macos-latest, ubuntu-latest, windows-latest]
 
     steps:
-      - name: Install libarchive-tools for pacman build # Related https://github.com/electron-userland/electron-builder/issues/4181
-        if: startsWith(matrix.os, 'ubuntu')
-        run: sudo apt-get install libarchive-tools
-
       - name: Check out Git repository
         uses: actions/checkout@v3
         with:
           submodules: true
 
-      - name: Install Node.js, NPM and Yarn
+      # Install system dependencies for each platform
+      - name: Install dependencies on Ubuntu
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libarchive-tools
+
+      - name: Install Python on macOS
+        if: matrix.os == 'macos-latest'
+        uses: actions/setup-python@v4
+        with:
+          # Use Python 3.10 (or 3.11) to ensure distutils is available
+          python-version: '3.10'
+
+      - name: Ensure distutils / wheel on macOS
+        if: matrix.os == 'macos-latest'
+        run: |
+          python -m ensurepip
+          python -m pip install --upgrade pip setuptools wheel
+
+      - name: Install Python on Windows
+        if: matrix.os == 'windows-latest'
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install CMake on Windows
+        if: matrix.os == 'windows-latest'
+        run: choco install cmake --installargs "ADD_CMAKE_TO_PATH=1" -y
+
+      - name: Install Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: 'lts/*'
-
-      - name: Install build tools (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          xcode-select --install
-          brew install python@3.13  # Install python to fix distutils issue on macOS
-
-      - name: Install build tools (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          npm install --global windows-build-tools
+          # Use Node 20.x (LTS) or higher
+          node-version: '20.x'
 
       - name: Non-tag specific build step
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         run: echo "This build was triggered without a tag."
 
-      - name: Install dependencies with --build-from-source
-        run: |
-          npm install --build-from-source
-          
       - name: Build binaries with electron-builder
-        uses: coparse-inc/action-electron-builder@29a7606c7d726b5b0f4dc2f334026f58bea0e1bb # v1.6.0 but safer than a tag that can be changed
+        uses: coparse-inc/action-electron-builder@29a7606c7d726b5b0f4dc2f334026f58bea0e1bb
         with:
           max_attempts: 2
           github_token: ${{ secrets.github_token }}
