@@ -23,6 +23,7 @@
     "postinstall": "patch-package && electron-builder install-app-deps"
   },
   "build": {
+    "buildDependenciesFromSource": true,
     "npmRebuild": true,
     "asar": true,
     "appId": "peersky.p2plabs.xyz",
