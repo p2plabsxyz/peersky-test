@@ -20,7 +20,7 @@
     "start": "electron .",
     "build": "electron-builder build --publish never",
     "build-all": "electron-builder build -mwl",
-    "postinstall": "patch-package && electron-builder install-app-deps"
+    "postinstall": "patch-package && npm rebuild --build-from-source && electron-builder install-app-deps"
   },
   "build": {
     "buildDependenciesFromSource": true,
@@ -134,6 +134,7 @@
     "content-hash": "^2.5.2",
     "content-type": "^1.0.5",
     "electron-log": "^5.3.0",
+    "electron-rebuild": "^3.2.9",
     "electron-updater": "^6.2.1",
     "ethers": "^6.13.4",
     "find-process": "^1.4.7",
