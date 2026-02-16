@@ -1,5 +1,5 @@
 {
-  "name": "peersky-browser",
+  "name": "peersky-test",
   "version": "1.0.0-beta.17",
   "description": "A minimal local-first p2p web browser: access, communicate, and publish offline.",
   "keywords": [
@@ -14,7 +14,7 @@
   "author": "Akhilesh Thite <akhileshthite@hotmail.com> (https://akhilesh.art/)",
   "main": "src/main.js",
   "type": "module",
-  "repository": "https://github.com/p2plabsxyz/peersky-browser",
+  "repository": "https://github.com/p2plabsxyz/peersky-test",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "electron .",
@@ -145,7 +145,7 @@
       {
         "provider": "github",
         "owner": "p2plabsxyz",
-        "repo": "peersky-browser",
+        "repo": "",
         "releaseType": "release"
       }
     ]
