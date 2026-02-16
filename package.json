@@ -1,7 +1,7 @@
 {
   "name": "peersky-browser",
-  "version": "1.0.0",
-  "description": "A minimal p2p web browser.",
+  "version": "1.0.0-beta.17",
+  "description": "A minimal local-first p2p web browser: access, communicate, and publish offline.",
   "keywords": [
     "peersky",
     "ipfs",
@@ -14,17 +14,23 @@
   "author": "Akhilesh Thite <akhileshthite@hotmail.com> (https://akhilesh.art/)",
   "main": "src/main.js",
   "type": "module",
-  "repository": "https://github.com/p2plabsxyz/peersky-test",
+  "repository": "https://github.com/p2plabsxyz/peersky-browser",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "electron .",
+    "postinstall": "node scripts/postinstall.js",
     "build": "electron-builder build --publish never",
-    "build-all": "electron-builder build -mwl",
-    "postinstall": "electron-builder install-app-deps"
+    "build-all": "electron-builder build -mwl"
   },
   "build": {
-    "npmRebuild": true,
+    "npmRebuild": false,
     "asar": true,
+    "asarUnpack": [
+      "node_modules/**",
+      "src/**",
+      "public/*",
+      "package.json"
+    ],
     "appId": "peersky.p2plabs.xyz",
     "productName": "Peersky Browser",
     "directories": {
@@ -39,6 +45,14 @@
     ],
     "mac": {
       "artifactName": "${name}-${version}-${os}-${arch}.${ext}",
+      "gatekeeperAssess": false,
+      "identity": null,
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "The current page is asking to use your microphone",
+        "NSCameraUsageDescription": "The current page is asking to use your camera",
+        "com.apple.security.device.audio-input": true,
+        "com.apple.security.device.camera": true
+      },
       "target": [
         {
           "target": "default",
@@ -48,7 +62,7 @@
           ]
         }
       ],
-      "icon": "./public/icon.png"
+      "icon": "./public/icon.icns"
     },
     "win": {
       "target": [
@@ -63,15 +77,36 @@
         "--enable-accelerated-video"
       ],
       "target": [
-        "deb",
+        {
+          "target": "deb",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
         "AppImage",
         "apk",
         "pacman"
       ],
-      "category": "Network;WebBrowser",
-      "icon": "./public/512x512.png"
+      "category": "Network;WebBrowser"
     },
     "protocols": [
+      {
+        "name": "webpages",
+        "schemes": [
+          "http",
+          "https"
+        ],
+        "role": "Viewer"
+      },
+      {
+        "name": "peersky",
+        "schemes": [
+          "peersky",
+          "browser"
+        ],
+        "role": "Viewer"
+      },
       {
         "name": "ipfs",
         "schemes": [
@@ -80,50 +115,76 @@
           "ipld"
         ],
         "role": "Viewer"
+      },
+      {
+        "name": "hyper",
+        "schemes": [
+          "hyper",
+          "dat"
+        ],
+        "role": "Viewer"
+      },
+      {
+        "name": "web3",
+        "schemes": [
+          "web3"
+        ],
+        "role": "Viewer"
+      },
+      {
+        "name": "bittorrent",
+        "schemes": [
+          "bittorrent",
+          "bt",
+          "magnet"
+        ],
+        "role": "Viewer"
       }
     ],
     "publish": [
       {
         "provider": "github",
         "owner": "p2plabsxyz",
-        "repo": "peersky-test",
+        "repo": "peersky-browser",
         "releaseType": "release"
       }
     ]
   },
   "dependencies": {
-    "@chainsafe/libp2p-gossipsub": "^13.0.0",
-    "@chainsafe/libp2p-noise": "^15.0.0",
-    "@chainsafe/libp2p-yamux": "^6.0.2",
-    "@helia/ipns": "^8.1.0",
-    "@helia/unixfs": "^3.0.6",
-    "@libp2p/bootstrap": "^10.0.24",
-    "@libp2p/kad-dht": "^12.0.17",
-    "@libp2p/mdns": "^11.0.8",
-    "@libp2p/mplex": "^10.0.24",
-    "@libp2p/peer-id": "^5.0.8",
-    "@libp2p/tcp": "^9.0.26",
-    "@libp2p/webrtc": "^4.0.33",
-    "@libp2p/websockets": "^8.0.24",
+    "@helia/ipns": "^8.2.3",
+    "@helia/unixfs": "^5.0.3",
+    "@libp2p/kad-dht": "^15.1.11",
+    "b4a": "^1.6.7",
+    "blockstore-level": "^2.0.3",
+    "chromium-net-errors": "^13.0.0",
     "content-hash": "^2.5.2",
     "content-type": "^1.0.5",
+    "datastore-level": "^11.0.3",
+    "electron-chrome-extensions": "^4.9.0",
+    "electron-chrome-web-store": "^0.13.0",
+    "electron-find": "^1.0.7",
+    "electron-log": "^5.3.0",
     "electron-updater": "^6.2.1",
     "ethers": "^6.13.4",
-    "find-process": "^1.4.7",
     "fs-extra": "^11.2.0",
-    "helia": "^5.2.0",
-    "hyper-sdk": "^5.0.0",
-    "hypercore-fetch": "^9.9.1",
+    "helia": "^5.4.2",
+    "hyper-sdk": "^6.1.0",
+    "hypercore-crypto": "^3.6.1",
+    "hypercore-fetch": "^10.0.0",
+    "hyperdht": "^6.27.0",
+    "hyperswarm": "^4.14.0",
     "jquery": "^3.7.1",
-    "libp2p": "^1.6.0",
-    "libp2p-gossipsub": "^0.13.0",
+    "libp2p": "^2.8.8",
     "mime-types": "^2.1.35",
-    "multiformats": "^13.1.0",
-    "node-cache": "^5.1.2",
-    "web3protocol": "^0.6.0"
+    "multiformats": "^13.3.2",
+    "scoped-fs": "^1.4.1",
+    "unzipper": "^0.10.14",
+    "web3protocol": "^0.6.0",
+    "webtorrent": "^2.8.5"
   },
   "devDependencies": {
-    "electron": "^34.1.1",
-    "electron-builder": "^25.1.8"
+    "chrome-extension-fetch": "^1.0.0",
+    "electron": "^37.2.2",
+    "electron-builder": "^26.0.12"
   }
 }

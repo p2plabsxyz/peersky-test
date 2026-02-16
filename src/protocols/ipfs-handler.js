@@ -3,7 +3,7 @@ import mime from "mime-types";
 import path from "path";
 import { directoryListingHtml } from "./helia/directoryListingTemplate.js";
 import { createNode } from "./helia/helia.js";
-import { unixfs } from "@helia/unixfs";
+import { unixfs, globSource } from "@helia/unixfs";
 import { ipns } from "@helia/ipns";
 import fs from "fs-extra";
 import contentHash from "content-hash";
@@ -11,7 +11,7 @@ import { CID } from "multiformats/cid";
 import { base32 } from "multiformats/bases/base32";
 import { base36 } from "multiformats/bases/base36";
 import { base58btc } from "multiformats/bases/base58";
-import { peerIdFromString } from "@libp2p/peer-id";
+import { peerIdFromString, peerIdFromCID } from "@libp2p/peer-id";
 import { ensCache, saveEnsCache, RPC_URL, ipfsOptions } from "./config.js";
 import { JsonRpcProvider } from "ethers";
 
@@ -30,6 +30,15 @@ function parseCID(cidString) {
   }
 }
 
+function getPeerIdFromString(peerIdString) {
+  // If the first character is '1' or 'Q', treat it as base58btc encoded PeerId.
+  if (peerIdString.charAt(0) === '1' || peerIdString.charAt(0) === 'Q') {
+    return peerIdFromString(peerIdString);
+  }
+  // Otherwise, assume it's a CID-encoded PeerId and parse it accordingly.
+  return peerIdFromCID(CID.parse(peerIdString, multibaseDecoder));
+}
+
 export async function createHandler(ipfsOptions, session) {
   let node, unixFileSystem, name;
 
@@ -38,14 +47,18 @@ export async function createHandler(ipfsOptions, session) {
     const startTime = Date.now();
     node = await createNode(ipfsOptions);
     console.log(`IPFS node initialized in ${Date.now() - startTime}ms`);
-    console.log("Peer ID:", node.libp2p.peerId.toString());
 
     // Ensure the node's PeerId has toBytes()
     if (typeof node.libp2p.peerId.toBytes !== "function") {
       node.libp2p.peerId.toBytes = () => node.libp2p.peerId.multihash.bytes;
       console.log("Patched node peerId to include toBytes() method.");
     }
-
+    // Also ensure the PeerID has a 'bytes' property (required by IPNS)
+    if (!node.libp2p.peerId.bytes) {
+      node.libp2p.peerId.bytes = node.libp2p.peerId.toBytes();
+      console.log("Patched node peerId to include bytes property.");
+    }
+    
     unixFileSystem = unixfs(node);
     name = ipns(node);
   }
@@ -55,41 +68,79 @@ export async function createHandler(ipfsOptions, session) {
   // Initialize Ethereum provider with configurable RPC URL
   const provider = new JsonRpcProvider(RPC_URL);
 
-  // Function to handle file uploads
+  // Function to handle file and directory uploads
   async function handleFileUpload(request, sendResponse) {
     try {
+      const startTime = Date.now();
       const entries = [];
+      let currentFileName = null;
+      
       for (const data of request.uploadData || []) {
+        console.log("Upload data entry:", JSON.stringify(Object.keys(data)), "type:", data.type);
+        
         if (data.type === "file" && data.file) {
-          const fileName = path.basename(data.file);
-          entries.push({
-            path: fileName,
-            content: fs.createReadStream(data.file),
-          });
+          const filePath = data.file;
+          const stats = await fs.stat(filePath);
+          if (stats.isDirectory()) {
+            // Handle directory with globSource for recursive upload
+            const source = globSource(filePath, '**/*');
+            for await (const entry of source) {
+              entries.push({
+                path: entry.path,
+                content: entry.content, // Readable stream for file content
+              });
+            }
+          } else {
+            // Handle individual file
+            const fileName = path.basename(filePath);
+            entries.push({
+              path: fileName,
+              content: fs.createReadStream(filePath, { highWaterMark: 1024 * 1024 }),
+            });
+          }
+        } else if (data.type === "rawData" && data.bytes) {
+          // This contains the FormData field name/filename metadata
+          // Parse the rawData to extract the filename
+          const rawDataString = Buffer.from(data.bytes).toString('utf-8');
+          console.log("Raw data string:", rawDataString);
+          
+          // Extract filename from Content-Disposition header in the rawData
+          const filenameMatch = rawDataString.match(/filename="([^"]+)"/);
+          if (filenameMatch) {
+            currentFileName = filenameMatch[1];
+            console.log("Extracted filename from rawData:", currentFileName);
+          }
         } else if (data.type === "blob" && data.blobUUID) {
+          // Handle blob data from FormData - use the filename from previous rawData entry
           const blobData = await session.getBlobData(data.blobUUID);
-          const fileName = "index.html";
+          const fileName = currentFileName || "index.html";
+          console.log("Processing blob with filename:", fileName, "blobUUID:", data.blobUUID);
           entries.push({ path: fileName, content: blobData });
+          currentFileName = null; // Reset for next file
         }
       }
-
+  
       if (entries.length === 0) {
         throw new Error("No files found in the upload data.");
       }
-
-      // Use addAll to upload files with paths
+  
+      // Use addAll to upload files with paths, wrapping with a directory
       const options = { wrapWithDirectory: true };
       let rootCid;
-
+  
       for await (const result of unixFileSystem.addAll(entries, options)) {
+        console.log("Added:", result.path, result.cid.toString());
         rootCid = result.cid;
       }
-
-      // Return URL without appending filename
+      console.log(`Added all files in ${Date.now() - startTime}ms`);
+  
+      // Pin the root CID recursively
+      await node.pins.add(rootCid, { recursive: true });
+      console.log(`Pinned in ${Date.now() - startTime}ms`);
+  
       const fileUrl = `ipfs://${rootCid.toString()}/`;
-
-      console.log("Files uploaded with root CID:", rootCid.toString());
-
+  
+      // Send response immediately after pinning
       sendResponse({
         statusCode: 200,
         headers: {
@@ -99,6 +150,18 @@ export async function createHandler(ipfsOptions, session) {
         },
         data: Readable.from(Buffer.from(fileUrl)),
       });
+
+      const peerCount = node.libp2p.getPeers().length;
+      console.log(`Providing ${rootCid} with ${peerCount} peers connected`);
+  
+      // Provide the root CID to the DHT in the background
+      node.libp2p.contentRouting.provide(rootCid).then(() => {
+        console.log(`Provided ${rootCid} to DHT in ${Date.now() - startTime}ms`);
+      }).catch(err => {
+        console.log('Error providing to DHT (non-critical):', err.message);
+      });
+  
+      console.log("Files uploaded with root CID:", rootCid.toString());
     } catch (e) {
       console.error("Error uploading file:", e);
       sendResponse({
@@ -114,16 +177,22 @@ export async function createHandler(ipfsOptions, session) {
     // Try peerIdFromString first
     let peerId;
     try {
-      peerId = peerIdFromString(ipnsName);
-      // Ensure peerId has toBytes()
+      // Use the helper function instead of directly calling peerIdFromString
+      peerId = getPeerIdFromString(ipnsName);
+      // Ensure the resolved PeerID has a proper toBytes() method
       if (typeof peerId.toBytes !== "function") {
         peerId.toBytes = () => peerId.multihash.bytes;
         console.log("Patched peerId to include toBytes() method.");
       }
+      // Also ensure the PeerID has a 'bytes' property
+      if (!peerId.bytes) {
+        peerId.bytes = peerId.toBytes();
+        console.log("Patched peerId to include bytes property.");
+      }
       const resolutionResult = await name.resolve(peerId, {
         signal: AbortSignal.timeout(5000),
       });
-
+      
       let resolvedCID = resolutionResult.cid;
       if (!(resolvedCID instanceof CID)) {
         // If cid is a string, parse it
@@ -244,6 +313,9 @@ export async function createHandler(ipfsOptions, session) {
           );
         } else {
           contentHashRaw = await resolver.getContentHash();
+          if (!contentHashRaw) {
+            throw new Error("No content hash set for ENS name " + ensName);
+          }
           ensCache.set(ensName, contentHashRaw);
           saveEnsCache(); // Persist the updated cache
           console.log(
