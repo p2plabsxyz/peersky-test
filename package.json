@@ -23,8 +23,9 @@
     "build-all": "electron-builder build -mwl"
   },
   "build": {
-    "npmRebuild": false,
+    "npmRebuild": true,
     "asar": false,
+    "afterPack": "./scripts/afterPack.js",
     "appId": "peersky.p2plabs.xyz",
     "productName": "Peersky Browser",
     "directories": {
