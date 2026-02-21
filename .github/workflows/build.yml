@@ -17,9 +17,9 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     strategy:
-      # Linux on 20.04: npmRebuild runs here, so rocksdb etc. link against 20.04 libstdc++
+      # Linux on 22.04: npmRebuild runs here, so rocksdb etc. link against 22.04 libstdc++
       matrix:
-        os: [macos-latest, ubuntu-20.04, windows-latest]
+        os: [macos-latest, ubuntu-22.04, windows-latest]
 
     steps:
       - name: Install libarchive-tools for pacman build # Related https://github.com/electron-userland/electron-builder/issues/4181
