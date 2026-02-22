@@ -24,7 +24,7 @@
   },
   "build": {
     "npmRebuild": true,
-    "asar": false,
+    "asar": true,
     "afterPack": "./scripts/afterPack.js",
     "appId": "peersky.p2plabs.xyz",
     "productName": "Peersky Browser",
@@ -37,6 +37,11 @@
       "public/*",
       "src/**/*",
       "src/*"
+    ],
+    "asarUnpack": [
+      "src/**",
+      "node_modules/**",
+      "package.json"
     ],
     "mac": {
       "artifactName": "${name}-${version}-${os}-${arch}.${ext}",
