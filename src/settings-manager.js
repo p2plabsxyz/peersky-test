@@ -2,14 +2,21 @@
 // Handles settings storage, defaults, validation, and IPC communication
 // Pattern: Similar to window-manager.js
 
-import { app, ipcMain, BrowserWindow, session, safeStorage } from 'electron';
+import { app, ipcMain, BrowserWindow, session, safeStorage, dialog } from 'electron';
 import { promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
 import { getBrowserSession } from './session.js';
+import { ensCache, ipfsCache, hyperCache, saveEnsCache, saveIpfsCache, saveHyperCache } from './protocols/config.js';
+import { normalizeEnsHash } from './ens-utils.js';
+import { clearPersistedPermissions } from './permissions.js';
+import p2pAppRegistry from './p2p-app-registry.js';
 
 const SETTINGS_FILE = path.join(app.getPath("userData"), "settings.json");
 const DEBUG_LOG = path.join(os.homedir(), '.peersky', 'debug.log');
+const MAX_ARCHIVE_EXPORT_BYTES = 5 * 1024 * 1024; // 5MB safety cap
+
+
 
 // Debug logging helper
 function logDebug(message) {
@@ -17,23 +24,59 @@ function logDebug(message) {
   fs.appendFile(DEBUG_LOG, entry).catch(() => {}); // Don't crash on failure
 }
 
+function normalizeArchiveJsonContent(jsonContent) {
+  let content;
+
+  if (typeof jsonContent === 'string') {
+    content = jsonContent;
+    try {
+      JSON.parse(content);
+    } catch {
+      throw new Error('Invalid archive export payload: string is not valid JSON');
+    }
+  } else if (jsonContent && typeof jsonContent === 'object') {
+    try {
+      content = JSON.stringify(jsonContent, null, 2);
+    } catch {
+      throw new Error('Invalid archive export payload: object could not be serialized');
+    }
+  } else {
+    throw new Error('Invalid archive export payload: expected a JSON string or object');
+  }
+
+  const sizeInBytes = Buffer.byteLength(content, 'utf8');
+  if (sizeInBytes > MAX_ARCHIVE_EXPORT_BYTES) {
+    throw new Error(
+      `Archive export payload too large: ${sizeInBytes} bytes (max ${MAX_ARCHIVE_EXPORT_BYTES} bytes)`
+    );
+  }
+
+  return content;
+}
+
 // Default settings configuration
 const DEFAULT_SETTINGS = {
-  searchEngine: 'duckduckgo',
+  searchEngine: 'duckduckgo_noai',
   customSearchTemplate: "https://duckduckgo.com/?q=%s",
   theme: 'dark',
   showClock: true,
+  clockFormat: '24h',
   verticalTabs: false,
   keepTabsExpanded: false,
-  wallpaper: 'redwoods',
+  wallpaper: 'ten_lakes',
   wallpaperCustomPath: null,
+  pinnedP2PApps: null,
   extensionP2PEnabled: false,
   extensionAutoUpdate: true,
+  autoUpdateEnabled: true,
+  memorySaverEnabled: false,
+  memorySaverExclusions: ['peersky://p2p/*'],
   llm: {
     enabled: false,
     baseURL: 'http://127.0.0.1:11434/',
     apiKey: 'ollama',
-    model: 'qwen2.5-coder:3b'
+    model: 'qwen2.5-coder:3b',
+    memoryEnabled: false
   }
 };
 
@@ -68,6 +111,8 @@ async function clearBrowserCache() {
     await clear(['indexdb']); // (Electron's internal key for IndexedDB)
     await clear(['cachestorage', 'serviceworkers']);
 
+    await clearPersistedPermissions();
+
     logDebug('Cache and storage cleared safely');
 
     // Step 3 → Notify all renderer processes to reinitialize
@@ -97,7 +142,9 @@ async function removeChildrenExcept(dir, keepNames = []) {
   await Promise.all(entries.map(async (ent) => {
     if (keep.has(ent.name)) return;
     const target = path.join(dir, ent.name);
-    await fs.rm(target, { recursive: true, force: true });
+    await fs.rm(target, { recursive: true, force: true }).catch((e) => {
+      logDebug(`Failed to remove ${target}: ${e.message}`);
+    });
   }));
 }
 
@@ -107,20 +154,31 @@ async function resetP2PData({ resetIdentities = false } = {}) {
   const hyperDir = path.join(USER_DATA, 'hyper');
   const ensCache = path.join(USER_DATA, 'ensCache.json');
   const btState = path.join(USER_DATA, 'bt-state.json');
+  const portsFile = path.join(USER_DATA, 'peersky-ports.json');
 
-  // ENS cache and BitTorrent state cache can always be removed
+  // ENS cache, BitTorrent state, and hs cache can always be removed
   await fs.rm(ensCache, { recursive: true, force: true }).catch(() => {});
   await fs.rm(btState, { recursive: true, force: true }).catch(() => {});
+  await fs.rm(portsFile, { recursive: true, force: true }).catch(() => {});
+  
+  // Wipe internal P2P User App Registry data and cleanly re-sync it
+  await p2pAppRegistry.reset();
+
+  // Wipe LLM memory file and invalidate in-memory cache
+  const llmMemoryFile = path.join(USER_DATA, 'llm.json');
+  await fs.rm(llmMemoryFile, { force: true }).catch(() => {});
+  try {
+    const llmMem = await import('./llm-memory.js');
+    llmMem.resetCache?.();
+  } catch {}
 
   if (resetIdentities) {
-    // full wipe
     await fs.rm(ipfsDir,  { recursive: true, force: true }).catch(() => {});
     await fs.rm(hyperDir, { recursive: true, force: true }).catch(() => {});
     logDebug('P2P reset: full wipe including identities');
   } else {
-    // preserve identity files by default
-    await removeChildrenExcept(ipfsDir,  ['libp2p-key']);          // IPFS Peer ID
-    await removeChildrenExcept(hyperDir, ['swarm-keypair.json']);  // Hyper identity
+    await removeChildrenExcept(ipfsDir,  ['libp2p-key']);
+    await removeChildrenExcept(hyperDir, ['swarm-keypair.json']);
     logDebug('P2P reset: data cleared, identities preserved');
   }
 }
@@ -265,6 +323,30 @@ class SettingsManager {
       }
     });
 
+    ipcMain.on('settings-get-clock-format-sync', (event) => {
+      try {
+        event.returnValue = this.settings.clockFormat || '24h';
+      } catch {
+        event.returnValue = '24h';
+      }
+    });
+
+    // Get list of default wallpapers
+    ipcMain.handle('settings-get-default-wallpapers', async () => {
+      try {
+        const srcDir = path.dirname(new URL(import.meta.url).pathname);
+        const defaultsDir = path.join(srcDir, 'pages', 'static', 'assets', 'wallpapers', 'defaults');
+        const files = await fs.readdir(defaultsDir);
+        const names = files
+          .filter(f => /\.(jpg|jpeg|png|webp)$/i.test(f))
+          .map(f => f.replace(/\.(jpg|jpeg|png|webp)$/i, ''));
+        return names;
+      } catch (error) {
+        logDebug(`Error listing default wallpapers: ${error.message}`);
+        return ['ten_lakes'];
+      }
+    });
+
     // Get wallpaper URL (async)
     ipcMain.handle('settings-get-wallpaper-url', async () => {
       try {
@@ -368,6 +450,86 @@ class SettingsManager {
         throw new Error(errorMsg);
       }
     });
+
+    // IPC handlers for archive functionality
+    ipcMain.handle("settings-get-archive-data", async () => {
+      return {
+        ipfs: ipfsCache || [],
+        hyper: hyperCache || [],
+        ens: Array.from((ensCache || new Map()).entries()).map(([name, entry]) => {
+          const rawHash = typeof entry === 'object' && entry !== null ? entry.hash : entry;
+          const timestamp = typeof entry === 'object' && entry !== null ? entry.timestamp : null;
+          return { name, hash: normalizeEnsHash(rawHash), timestamp };
+        })
+      };
+    });
+
+    ipcMain.handle("settings-export-archive", async (event, jsonContent) => {
+      const normalizedJsonContent = normalizeArchiveJsonContent(jsonContent);
+      const mainWindow = BrowserWindow.fromWebContents(event.sender);
+      const saveDialogOptions = {
+        title: "Export Archive Data",
+        defaultPath: path.join(app.getPath("downloads"), `peersky-archive-${new Date().toISOString().split('T')[0]}-${Math.floor(Math.random() * 1000000)}.json`),
+        filters: [{ name: "JSON", extensions: ["json"] }]
+      };
+      const { canceled, filePath } = mainWindow
+        ? await dialog.showSaveDialog(mainWindow, saveDialogOptions)
+        : await dialog.showSaveDialog(saveDialogOptions);
+
+      if (!canceled && filePath) {
+        await fs.writeFile(filePath, normalizedJsonContent, "utf-8");
+        return { success: true, filePath };
+      }
+      return { canceled: true };
+    });
+
+    // Get app version
+    ipcMain.handle('settings-get-version', async () => {
+      return app.getVersion();
+    });
+
+    ipcMain.handle("settings-clear-archive", async (event, cutoff) => {
+      try {
+        if (!cutoff || cutoff <= 0) {
+          // Clear all
+          if (ipfsCache) ipfsCache.length = 0;
+          if (hyperCache) hyperCache.length = 0;
+          if (ensCache) ensCache.clear();
+        } else {
+          // Keep entries outside the time window (before cutoff)
+          if (ipfsCache) {
+            const kept = ipfsCache.filter(item => item.timestamp < cutoff);
+            ipfsCache.length = 0;
+            kept.forEach(item => ipfsCache.push(item));
+          }
+          if (hyperCache) {
+            const kept = hyperCache.filter(item => item.timestamp < cutoff);
+            hyperCache.length = 0;
+            kept.forEach(item => hyperCache.push(item));
+          }
+          // ENS entries often lack timestamps, so only remove entries that have
+          // a timestamp within the window; keep all entries without timestamps.
+          if (ensCache) {
+            for (const [name, value] of ensCache.entries()) {
+              const ts = (typeof value === 'object' && value !== null) ? value.timestamp : null;
+              if (ts && ts >= cutoff) ensCache.delete(name);
+            }
+          }
+        }
+
+        // Save caches to disk
+        saveIpfsCache();
+        saveHyperCache();
+        saveEnsCache();
+        
+        return { success: true };
+      } catch (error) {
+        logDebug(`Failed to clear archive: ${error.message}`);
+        return { success: false, error: error.message };
+      }
+    });
+
+
   }
 
   async loadSettings() {
@@ -400,7 +562,8 @@ class SettingsManager {
             enabled: llmSettings.enabled || false,
             baseURL: llmSettings.baseURL || DEFAULT_SETTINGS.llm.baseURL,
             apiKey: this.decryptApiKey(llmSettings.apiKey || DEFAULT_SETTINGS.llm.apiKey),
-            model: llmSettings.model || DEFAULT_SETTINGS.llm.model
+            model: llmSettings.model || DEFAULT_SETTINGS.llm.model,
+            memoryEnabled: typeof llmSettings.memoryEnabled === 'boolean' ? llmSettings.memoryEnabled : false
           };
         } else {
           this.settings[key] = loaded[key];
@@ -481,10 +644,15 @@ class SettingsManager {
           "violet",
         ].includes(v),
       showClock: (v) => typeof v === "boolean",
+      clockFormat: (v) => ['12h', '24h'].includes(v),
       verticalTabs: (v) => typeof v === "boolean",
       keepTabsExpanded: (v) => typeof v === "boolean",
-      wallpaper: (v) => ["redwoods", "mountains", "custom"].includes(v),
+      wallpaper: (v) => typeof v === "string",
       wallpaperCustomPath: (v) => v === null || typeof v === "string",
+      pinnedP2PApps: (v) => v === null || (Array.isArray(v) && v.every(id => typeof id === 'string')),
+      autoUpdateEnabled: (v) => typeof v === "boolean",
+      memorySaverEnabled: (v) => typeof v === "boolean",
+      memorySaverExclusions: (v) => Array.isArray(v) && v.every(ex => typeof ex === 'string'),
       llm: (v) => {
         // Validate LLM settings object (simplified for Ollama-only)
         if (typeof v !== 'object' || v === null) return false;
@@ -494,6 +662,7 @@ class SettingsManager {
         if (typeof v.baseURL !== 'string') return false;
         if (typeof v.apiKey !== 'string') return false;
         if (typeof v.model !== 'string') return false;
+        if (v.memoryEnabled !== undefined && typeof v.memoryEnabled !== 'boolean') return false;
         
         return true;
       }
@@ -518,9 +687,11 @@ class SettingsManager {
     this.applySettingChange('theme', this.settings.theme);
     this.applySettingChange('searchEngine', this.settings.searchEngine);
     this.applySettingChange('showClock', this.settings.showClock);
+    this.applySettingChange('clockFormat', this.settings.clockFormat);
     this.applySettingChange('verticalTabs', this.settings.verticalTabs);
     this.applySettingChange('keepTabsExpanded', this.settings.keepTabsExpanded);
     this.applySettingChange('wallpaper', this.settings.wallpaper);
+    this.applySettingChange('pinnedP2PApps', this.settings.pinnedP2PApps);
   }
 
   applySettingChange(key, value) {
@@ -552,6 +723,12 @@ class SettingsManager {
             window.webContents.send('show-clock-changed', value);
           }
         });
+      } else if (key === 'clockFormat') {
+        windows.forEach(window => {
+          if (window && !window.isDestroyed()) {
+            window.webContents.send('clock-format-changed', value);
+          }
+        });
       } else if (key === 'wallpaper') {
         // Notify windows of wallpaper change
         windows.forEach(window => {
@@ -576,6 +753,21 @@ class SettingsManager {
         windows.forEach(window => {
           if (window && !window.isDestroyed()) {
             window.webContents.send('wallpaper-changed', this.settings.wallpaper);
+          }
+        });
+      } else if (key === 'pinnedP2PApps') {
+        windows.forEach(window => {
+          if (window && !window.isDestroyed()) {
+            window.webContents.send('pinned-apps-changed', value);
+          }
+        });
+      } else if (key === 'memorySaverEnabled' || key === 'memorySaverExclusions') {
+        windows.forEach(window => {
+          if (window && !window.isDestroyed()) {
+            window.webContents.send('memory-saver-changed', {
+              enabled: this.settings.memorySaverEnabled,
+              exclusions: this.settings.memorySaverExclusions
+            });
           }
         });
       } else if (key === "customSearchTemplate") {
@@ -619,9 +811,17 @@ class SettingsManager {
     if (this.settings.wallpaper === 'custom' && this.settings.wallpaperCustomPath) {
       return this.settings.wallpaperCustomPath;
     }
-    // Return path to built-in wallpaper
-    const wallpaperFile = this.settings.wallpaper === 'mountains' ? 'mountains.jpg' : 'redwoods.jpg';
-    return path.join(__dirname, 'pages', 'static', 'assets', wallpaperFile);
+    // Return path to built-in wallpaper in wallpapers/defaults/
+    const fileName = `${this.settings.wallpaper}.jpg`;
+    return path.join(
+      __dirname,
+      'pages',
+      'static',
+      'assets',
+      'wallpapers',
+      'defaults',
+      fileName
+    );
   }
 
   // Get wallpaper URL for browser usage
@@ -631,9 +831,9 @@ class SettingsManager {
       const filename = path.basename(this.settings.wallpaperCustomPath);
       return `peersky://wallpaper/${filename}`;
     }
-    // Return URL to built-in wallpaper
-    const wallpaperFile = this.settings.wallpaper === 'mountains' ? 'mountains.jpg' : 'redwoods.jpg';
-    return `peersky://static/assets/${wallpaperFile}`;
+    // Return URL to built-in wallpaper in wallpapers/defaults/
+    const fileName = `${this.settings.wallpaper}.jpg`;
+    return `peersky://static/assets/wallpapers/defaults/${fileName}`;
   }
 }
 

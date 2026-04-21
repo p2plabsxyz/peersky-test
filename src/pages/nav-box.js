@@ -5,6 +5,9 @@ const navBoxIPC = (() => {
   return ipcRenderer;
 })();
 
+// webUtils for getting file paths from dropped files (Electron 25+)
+const { webUtils } = require('electron');
+
 class NavBox extends HTMLElement {
   constructor() {
     super();
@@ -46,8 +49,8 @@ class NavBox extends HTMLElement {
   buildNavBox() {
     this.id = "navbox";
     const buttons = [
-      { id: "back", svg: "left.svg", position: "start" },
-      { id: "forward", svg: "right.svg", position: "start" },
+      { id: "back", svg: "arrow-left.svg", position: "start" },
+      { id: "forward", svg: "arrow-right.svg", position: "start" },
       { id: "refresh", svg: "reload.svg", position: "start" },
       { id: "home", svg: "home.svg", position: "start" },
       { id: "bookmark", svg: "bookmark.svg", position: "start" },
@@ -410,6 +413,17 @@ class NavBox extends HTMLElement {
     document.querySelectorAll('.temp-icon').forEach(el => el.remove());
   }
 
+  removeTempIconForExtension(extensionId) {
+    if (!extensionId) return;
+    const icons = this.querySelectorAll('.temp-icon');
+    for (const el of icons) {
+      if (el.dataset.extensionId === extensionId) {
+        this.removeTempIcon(el);
+        break;
+      }
+    }
+  }
+
   removeTempIcon(tempIcon) {
     if (!tempIcon || !tempIcon.parentNode) return;
     
@@ -542,8 +556,19 @@ class NavBox extends HTMLElement {
     const currentUrl = this.querySelector("#url").value;
     if (!currentUrl) return;
 
+    let qrUrl = currentUrl;
+    try {
+      const urlObj = new URL(currentUrl);
+      if (urlObj.pathname.includes('/p2pmd/')) {
+        const roomKey = urlObj.searchParams.get('roomKey');
+        if (roomKey) {
+          qrUrl = decodeURIComponent(roomKey);
+        }
+      }
+    } catch {}
+
     this._qrPopup = document.createElement("qr-popup");
-    this._qrPopup.setAttribute("url", currentUrl);
+    this._qrPopup.setAttribute("url", qrUrl);
     this._qrPopup.setAttribute("visible", "");
     this._qrButton = this.buttonElements["qr-code"];
 
@@ -757,20 +782,35 @@ class NavBox extends HTMLElement {
       const handleDropNavigate = (event) => {
         event.preventDefault();
         event.stopPropagation();
-
         const { dataTransfer } = event;
         if (!dataTransfer) return;
-
         if (dataTransfer.files && dataTransfer.files.length > 0) {
           const file = dataTransfer.files[0];
-          const targetUrl = normalizeFilePathToUrl(file.path);
+          const filePath = webUtils.getPathForFile(file);
+          
+          // Check for .torrent BEFORE falling back to normal file browsing
+          if (file.name && file.name.toLowerCase().endsWith('.torrent')) {
+            navBoxIPC.invoke('resolve-torrent-file', filePath).then(torrentUrl => {
+              if (torrentUrl) {
+                urlInput.value = torrentUrl;
+                this.dispatchEvent(new CustomEvent("navigate", { detail: { url: torrentUrl } }));
+              } else {
+                throw new Error('Could not resolve .torrent file');
+              }
+            }).catch(err => {
+              console.error('[NavBox] Failed to resolve torrent file:', err);
+              this.showToast('Failed to open torrent file', 'error');
+            });
+            
+            return;
+          }
+          const targetUrl = normalizeFilePathToUrl(filePath);
           if (targetUrl) {
             urlInput.value = targetUrl;
             this.dispatchEvent(new CustomEvent("navigate", { detail: { url: targetUrl } }));
             return;
           }
         }
-
         const textUrl = dataTransfer.getData("text/uri-list") || dataTransfer.getData("text/plain");
         if (textUrl) {
           const url = textUrl.trim();
@@ -936,10 +976,24 @@ class NavBox extends HTMLElement {
         const result = await navBoxIPC.invoke('history-search', query);
         
         if (result.success && result.results && result.results.length > 0) {
-          this._autocompleteResults = result.results;
-          this._autocompleteSelectedIndex = -1;
-          this._renderAutocompleteResults();
-          this._showAutocomplete();
+          // Get current page URL from active webview via tab-bar
+          const tabBar = document.querySelector('tab-bar');
+          const currentPageUrl = tabBar?.getActiveWebview()?.getURL?.();
+          
+          // Filter out current page from suggestions
+          const filteredResults = currentPageUrl 
+            ? result.results.filter(r => r.url !== currentPageUrl)
+            : result.results;
+          
+          if (filteredResults.length > 0) {
+            this._autocompleteResults = filteredResults;
+            this._autocompleteSelectedIndex = -1;
+            this._renderAutocompleteResults();
+            this._showAutocomplete();
+          } else {
+            this._autocompleteResults = [];
+            this._hideAutocomplete();
+          }
         } else {
           this._autocompleteResults = [];
           this._hideAutocomplete();
@@ -1042,10 +1096,12 @@ class NavBox extends HTMLElement {
         this._selectAutocompleteItem(result);
       });
 
-      // Hover handler
-      item.addEventListener('mouseenter', () => {
-        this._autocompleteSelectedIndex = index;
-        this._updateAutocompleteSelection();
+      // Hover handler - use mousemove so stationary cursor doesn't auto-select
+      item.addEventListener('mousemove', () => {
+        if (this._autocompleteSelectedIndex !== index) {
+          this._autocompleteSelectedIndex = index;
+          this._updateAutocompleteSelection();
+        }
       });
 
       dropdown.appendChild(item);

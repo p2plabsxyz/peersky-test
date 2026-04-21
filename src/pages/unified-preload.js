@@ -19,7 +19,9 @@ const isExtensions = url.startsWith('peersky://extensions');
 const isHome = url.startsWith('peersky://home');
 const isBookmarks = url.includes('peersky://bookmarks');
 const isTabsPage = url.includes('peersky://tabs');
-const isInternal = url.startsWith('peersky://') || url.startsWith('file://') || url.includes('agregore.mauve.moe');
+const isP2PPage = url.startsWith('peersky://p2p');
+const isUserP2PApp = url.startsWith('peersky://myapps');
+const isInternal = (url.startsWith('peersky://') && !isUserP2PApp) || url.startsWith('file://') || url.includes('agregore.mauve.moe');
 const isExternal = !isInternal;
 
 console.log('Unified-preload: URL detection', { url, isInternal, isExternal });
@@ -27,7 +29,8 @@ console.log('Unified-preload: URL detection', { url, isInternal, isExternal });
 const isP2P =
   url.startsWith('hyper://') ||
   url.startsWith('ipfs://')  ||
-  url.startsWith('ipns://');
+  url.startsWith('ipns://') ||
+  url.startsWith('hs://');
 
 const isBitTorrent =
   url.startsWith('bt://') ||
@@ -42,8 +45,8 @@ if (isBitTorrent) {
   });
 }
 
-// Expose LLM API for internal pages and Agregore examples
-if (isInternal || isP2P || url.includes('agregore.mauve.moe')) {
+// Expose LLM API for internal pages, P2P apps, and trusted domains
+if (isInternal || isP2P || isUserP2PApp || url.includes('agregore.mauve.moe')) {
   console.log('Unified-preload: Exposing LLM API for page:', url);
   // Iterator management for streaming
   const iteratorMaps = new Map();
@@ -80,6 +83,7 @@ if (isInternal || isP2P || url.includes('agregore.mauve.moe')) {
   // We need to inject a script to create the complex object structure
   contextBridge.exposeInMainWorld('_llmBridge', {
     isSupported: () => ipcRenderer.invoke('llm-supported'),
+    modelInfo: () => ipcRenderer.invoke('llm-model-info'),
     chat: (args) => ipcRenderer.invoke('llm-chat', args),
     complete: (args) => ipcRenderer.invoke('llm-complete', args),
     chatStream: chatStream,
@@ -87,6 +91,17 @@ if (isInternal || isP2P || url.includes('agregore.mauve.moe')) {
     iteratorNext: iteratorNext,
     iteratorReturn: iteratorReturn
   });
+
+  // LLM Memory: internal pages only
+  if (isInternal || isUserP2PApp) {
+    contextBridge.exposeInMainWorld('llmMemory', {
+      add: (entry) => ipcRenderer.invoke('llm-memory-add', entry),
+      list: (opts) => ipcRenderer.invoke('llm-memory-list', opts || {}),
+      listSessions: (opts) => ipcRenderer.invoke('llm-memory-list-sessions', opts || {}),
+      clear: (opts) => ipcRenderer.invoke('llm-memory-clear', opts || {}),
+      isEnabled: () => ipcRenderer.invoke('llm-memory-enabled')
+    });
+  }
   
   const script = document.createElement('script');
   script.textContent = `
@@ -290,10 +305,10 @@ if (isInternal || isP2P || url.includes('agregore.mauve.moe')) {
   }
 }
 
-const context = { url, isSettings, isExtensions, isHome, isBookmarks, isTabsPage, isInternal, isExternal };
+const context = { url, isSettings, isExtensions, isHome, isBookmarks, isTabsPage, isP2PPage, isInternal, isExternal };
 
 console.log(`Unified-preload: Context detection - URL: ${url}`);
-console.log(`Unified-preload: isSettings: ${isSettings}, isExtensions: ${isExtensions}, isHome: ${isHome}, isBookmarks: ${isBookmarks}, isInternal: ${isInternal}, isExternal: ${isExternal}`);
+console.log(`Unified-preload: isSettings: ${isSettings}, isExtensions: ${isExtensions}, isHome: ${isHome}, isBookmarks: ${isBookmarks}, isP2PPage: ${isP2PPage}, isInternal: ${isInternal}, isExternal: ${isExternal}`);
 
 // Factory function to create context-appropriate settings API with access control
 function createSettingsAPI(pageContext) {
@@ -327,7 +342,12 @@ function createSettingsAPI(pageContext) {
           throw new Error('File data must include name and content');
         }
         return ipcRenderer.invoke('settings-upload-wallpaper', fileData);
-      }
+      },
+      getDefaultWallpapers: () => ipcRenderer.invoke('settings-get-default-wallpapers'),
+      getVersion: () => ipcRenderer.invoke('settings-get-version'),
+      getArchiveData: () => ipcRenderer.invoke('settings-get-archive-data'),
+      exportArchive: (jsonContent) => ipcRenderer.invoke('settings-export-archive', jsonContent),
+      clearArchive: (cutoff) => ipcRenderer.invoke('settings-clear-archive', cutoff)
     };
   } else if (pageContext.isExtensions) {
     // Extensions pages get limited settings API - only theme access
@@ -341,14 +361,32 @@ function createSettingsAPI(pageContext) {
       }
     };
   } else if (pageContext.isHome) {
-    // Limited API for home pages - only clock and wallpaper
+    // Limited API for home pages - clock, wallpaper, and pinned P2P apps
     return {
       get: (key) => {
-        const allowedKeys = ['showClock', 'wallpaper'];
+        const allowedKeys = ['showClock', 'wallpaper', 'clockFormat', 'pinnedP2PApps'];
         if (!allowedKeys.includes(key)) {
           throw new Error(`Access denied: Home pages can only access: ${allowedKeys.join(', ')}`);
         }
         return baseAPI.get(key);
+      }
+    };
+  } else if (pageContext.isP2PPage) {
+    // P2P pages can read/write pinnedP2PApps setting
+    return {
+      get: (key) => {
+        const allowedKeys = ['theme', 'verticalTabs', 'pinnedP2PApps'];
+        if (!allowedKeys.includes(key)) {
+          throw new Error(`Access denied: P2P pages can only access: ${allowedKeys.join(', ')}`);
+        }
+        return baseAPI.get(key);
+      },
+      set: (key, value) => {
+        const allowedKeys = ['pinnedP2PApps'];
+        if (!allowedKeys.includes(key)) {
+          throw new Error(`Access denied: P2P pages can only set: ${allowedKeys.join(', ')}`);
+        }
+        return ipcRenderer.invoke('settings-set', key, value);
       }
     };
   } else if (pageContext.isInternal) {
@@ -463,6 +501,16 @@ const extensionAPI = {
   onExtensionError: (callback) => createEventListener('extension-error', callback)
 };
 
+const p2pAppsAPI = {
+  list: () => ipcRenderer.invoke('p2p-user-apps-list'),
+  uploadIcon: (appId, name, data) => ipcRenderer.invoke('p2p-user-apps-upload-icon', { appId, name, data }),
+  importFolder: (name, files) => ipcRenderer.invoke('p2p-user-apps-import-folder', { name, files }),
+  selectAndImportFolder: () => ipcRenderer.invoke('p2p-user-apps-select-folder'),
+  removeApp: (appId) => ipcRenderer.invoke('p2p-user-apps-remove', appId),
+  importFromDrop: (folderPath) => ipcRenderer.invoke('p2p-user-apps-import-drop', folderPath),
+  updateSubmodules: () => ipcRenderer.invoke('p2p-apps-update-submodules')
+};
+
 // Create context-appropriate APIs
 const settingsAPI = createSettingsAPI(context);
 
@@ -488,6 +536,7 @@ try {
       onThemeChanged: (callback) => createEventListener('theme-changed', callback),
       onSearchEngineChanged: (callback) => createEventListener('search-engine-changed', callback),
       onShowClockChanged: (callback) => createEventListener('show-clock-changed', callback),
+      onClockFormatChanged: (callback) => createEventListener('clock-format-changed', callback),
       onWallpaperChanged: (callback) => createEventListener('wallpaper-changed', callback),
       readCSS: cssAPI.readCSS,
       extensions: extensionAPI,
@@ -541,6 +590,14 @@ try {
       console.warn('Unified-preload: Failed to get wallpaper URL:', error.message);
     }
 
+    let clockFormat = '24h';
+    try {
+      clockFormat = ipcRenderer.sendSync('settings-get-clock-format-sync');
+      console.log('Unified-preload: Clock format retrieved:', clockFormat);
+    } catch (error) {
+      console.warn('Unified-preload: Failed to get clock format:', error.message);
+    }
+
     // Function to inject wallpaper style
     const injectWallpaper = () => {
       if (wallpaperURL && typeof wallpaperURL === 'string') {
@@ -585,9 +642,15 @@ try {
     // Home electronAPI with browser action support for extension toolbar
     contextBridge.exposeInMainWorld('electronAPI', {
       settings: settingsAPI, // Uses limited home API automatically
+      getClockFormatSync: () => clockFormat,
       getWallpaperUrl: () => ipcRenderer.invoke('settings-get-wallpaper-url'),
       onShowClockChanged: (callback) => createEventListener('show-clock-changed', callback),
+      onPinnedAppsChanged: (callback) => createEventListener('pinned-apps-changed', callback),
+      onClockFormatChanged: (callback) => createEventListener('clock-format-changed', callback),
       onWallpaperChanged: (callback) => createEventListener('wallpaper-changed', callback),
+      p2pApps: {
+        list: p2pAppsAPI.list
+      },
       // Extension browser action APIs for home page toolbar
       extensions: {
         getBrowserActions: () => ipcRenderer.invoke('extensions-list-browser-actions'),
@@ -632,7 +695,30 @@ try {
       loadTabComponents: () => ipcRenderer.send('load-tab-components'),
       onVerticalTabsChanged: (callback) => createEventListener('vertical-tabs-changed', callback)
     })
-  } else if (isInternal) {
+  } else if (isP2PPage) {
+    // P2P management pages get environment + pinned apps settings access
+    contextBridge.exposeInMainWorld('peersky', {
+      environment: {
+        platform: process.platform,
+        version: process.versions.electron
+      },
+      llm: {
+        isSupported: () => ipcRenderer.invoke('llm-supported'),
+        chat: (messages, options) => ipcRenderer.invoke('llm-chat', messages, options),
+        complete: (prompt, options) => ipcRenderer.invoke('llm-complete', prompt, options)
+      },
+      printToPdf: (html, fileName) => ipcRenderer.invoke('p2pmd-print-to-pdf', { html, fileName })
+    });
+
+    contextBridge.exposeInMainWorld('electronAPI', {
+      settings: settingsAPI,
+      onPinnedAppsChanged: (callback) => createEventListener('pinned-apps-changed', callback),
+      p2pApps: p2pAppsAPI
+    });
+
+    console.log('Unified-preload: P2P page API exposed (pinnedP2PApps settings)');
+
+  } else if (isInternal || isP2P) {
     // Other internal pages get minimal environment + very limited settings
     contextBridge.exposeInMainWorld('peersky', {
       environment: {
@@ -644,7 +730,8 @@ try {
         isSupported: () => ipcRenderer.invoke('llm-supported'),
         chat: (messages, options) => ipcRenderer.invoke('llm-chat', messages, options),
         complete: (prompt, options) => ipcRenderer.invoke('llm-complete', prompt, options)
-      }
+      },
+      printToPdf: (html, fileName) => ipcRenderer.invoke('p2pmd-print-to-pdf', { html, fileName })
     });
     
     // Very minimal electronAPI for theme and tabs settings
@@ -750,6 +837,23 @@ window.addEventListener('DOMContentLoaded', async () => {
       }
     }
     
+    // Inject syntax highlighting font for internal pages only (peersky://, browser://)
+    const isInternalPage = window.location.protocol === 'peersky:' || window.location.protocol === 'browser:';
+    if (isInternalPage) {
+      const fontStyle = document.createElement('style');
+      fontStyle.textContent = `
+        @font-face {
+          font-family: 'FontWithASyntaxHighlighter';
+          src: url('browser://theme/fonts/FontWithASyntaxHighlighter-Regular.woff2') format('woff2');
+        }
+        pre, code {
+          font-family: 'FontWithASyntaxHighlighter', monospace;
+        }
+      `;
+      document.head.appendChild(fontStyle);
+      console.log('Unified-preload: Syntax highlighting font injected for internal page');
+    }
+
     // Check if page already has stylesheets
     const hasStylesheets = [...document.styleSheets].some(s => {
       try { return !!s.cssRules } catch { return false }

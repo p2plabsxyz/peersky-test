@@ -28,6 +28,10 @@
           <img src="peersky://static/assets/svg/palette.svg" class="nav-icon" alt="Appearance Icon">
           <span>Appearance</span>
         </a>
+        <a href="#general" class="nav-item" data-section="general">
+          <img src="peersky://static/assets/svg/sliders.svg" class="nav-icon" alt="General Icon">
+          <span>General</span>
+        </a>
         <a href="#search" class="nav-item" data-section="search">
           <img src="peersky://static/assets/svg/search.svg" class="nav-icon" alt="Search Icon">
           <span>Search</span>
@@ -48,7 +52,11 @@
           <img src="peersky://static/assets/svg/puzzle.svg" class="nav-icon" alt="Extensions Icon">
           <span>Extensions</span>
         </a>
-        <a href="peersky://history" target="_blank" rel="noopener noreferrer" class="nav-item">
+        <a href="#archive" class="nav-item" data-section="archive">
+          <img src="peersky://static/assets/svg/folder.svg" class="nav-icon" alt="Archive Icon">
+          <span>Archive</span>
+        </a>
+        <a id="history-nav-link" href="#" class="nav-item">
           <img src="peersky://static/assets/svg/clock-history.svg" class="nav-icon" alt="Clock History Icon">
           <span>History</span>
         </a>
@@ -85,13 +93,12 @@
             <div class="setting-label">Built-in wallpapers</div>
             <div class="setting-control">
               <div class="custom-select" id="wallpaper-select">
-                <div class="select-display" data-value="redwoods">Redwoods</div>
+                <div class="select-display" data-value="ten_lakes">Ten Lakes</div>
                 <div class="select-dropdown">
-                  <div class="select-option" data-value="redwoods">Redwoods</div>
-                  <div class="select-option" data-value="mountains">Mountains</div>
+                  <!-- Options dynamically loaded from wallpaper/defaults/ -->
                 </div>
               </div>
-              <input type="hidden" id="wallpaper-selector" value="redwoods">
+              <input type="hidden" id="wallpaper-selector" value="ten_lakes">
             </div>
           </div>
 
@@ -111,6 +118,51 @@
                 <input type="checkbox" id="show-clock" class="toggle-input">
                 <span class="toggle-slider"></span>
               </label>
+            </div>
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-label">Clock format</div>
+            <div class="setting-control">
+              <div class="custom-select" id="clock-format-select">
+                <div class="select-display" data-value="24h">24-hour</div>
+                <div class="select-dropdown">
+                  <div class="select-option" data-value="24h">24-hour</div>
+                  <div class="select-option" data-value="12h">12-hour</div>
+                </div>
+              </div>
+              <input type="hidden" id="clock-format" value="24h">
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- General Section -->
+      <div id="general-section" class="settings-page">
+        <h1 class="section-title">General</h1>
+
+        <section class="settings-section">
+          <div class="setting-row">
+            <div class="setting-label">
+              <div style="font-weight: 500;">Automatic updates</div>
+              <div class="setting-hint" style="margin-top: 4px;">Automatically check for and download new versions of Peersky Browser</div>
+            </div>
+            <div class="setting-control">
+              <label class="toggle-label">
+                <input type="checkbox" id="auto-update-enabled" class="toggle-input" checked>
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <div class="setting-row">
+            <div class="setting-label">
+              <div style="font-weight: 500;">Version</div>
+            </div>
+            <div class="setting-control">
+              <span id="app-version" style="color: var(--text-secondary); font-size: 0.9rem;">Loading...</span>
             </div>
           </div>
         </section>
@@ -224,12 +276,29 @@
             
             <div class="setting-row">
               <div class="setting-label">Model Name</div>
-              <div class="setting-control">
+              <div class="setting-control" style="flex-direction:column;align-items:flex-end;gap:4px">
                 <input type="text" id="ollama-model" class="setting-input" placeholder="e.g. qwen2.5-coder:3b or anthropic/claude-4.5-sonnet" value="qwen2.5-coder:3b">
+                <div id="model-capability" class="setting-hint" style="margin:0;font-size:0.72rem"></div>
               </div>
             </div>
           </section>
           
+          <h1 class="section-title">LLM Memory</h1>
+          <section class="settings-section">
+            <div class="setting-row" style="align-items:center">
+              <div style="flex:1;min-width:0">
+                <div class="setting-label">Enable LLM Memory</div>
+                <div class="setting-hint" style="margin-top:3px">Store prompts &amp; responses locally in llm.json. Memory is private and never shared unless you publish it. Cleared when you reset P2P data.</div>
+              </div>
+              <div class="setting-control" style="flex:none">
+                <label class="toggle-label">
+                  <input type="checkbox" id="llm-memory-enabled" class="toggle-input">
+                  <span class="toggle-slider"></span>
+                </label>
+              </div>
+            </div>
+          </section>
+
           <h1 class="section-title" id="llm-setup-title">Setup</h1>
           <section class="settings-section" id="llm-setup-section">
             <div class="setting-info">
@@ -303,13 +372,108 @@
             </div>
           </div>
         </section>
+        
+        <section class="settings-section">
+          <!-- Memory Saver Toggle Row -->
+          <div class="setting-row">
+            <div class="setting-label">
+              <div style="font-weight: 500;">Memory Saver</div>
+              <div class="setting-hint" style="margin-top: 4px; max-width: 400px;">Inactive tabs are suspended after <strong>30 minutes</strong> to free up RAM. Pinned tabs are never suspended.</div>
+            </div>
+            <div class="setting-control">
+              <label class="toggle-label">
+                <input type="checkbox" id="memory-saver-enabled" class="toggle-input">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <!-- Exclusion list — conditionally visible -->
+        <section class="settings-section" id="memory-exclusions-section" style="display: none;">
+          <div style="margin-bottom: 10px;">
+            <div style="font-weight: 500; margin-bottom: 4px;">Always keep these sites active</div>
+            <div class="setting-hint">Sites matching these domains will never be suspended (e.g. <code>getdweb.net</code>, <code>*.p2plabs.xyz</code>).</div>
+          </div>
+          <div style="display: flex; gap: 8px; margin-bottom: 10px;">
+            <input type="text" id="memory-exclusion-input" class="text-input input-fill" placeholder="Add a site (e.g. getdweb.net)" autocomplete="off" style="flex: 1; min-height: 36px;">
+            <button type="button" id="add-exclusion-btn" class="btn btn-secondary" style="height: 36px;">Add</button>
+          </div>
+          <div id="exclusion-list-container" style="border: 1px solid var(--settings-border); border-radius: 8px; padding: 6px 8px; min-height: 44px; max-height: 180px; overflow-y: auto; background: var(--settings-bg-secondary);">
+          </div>
+        </section>
+
         <tabs-box style="width:100%;"></tabs-box>
+      </div>
+      <!-- Archive Section -->
+      <!-- TODO: Add pagination with search bar at top - if more than 10 rows then it will move to another page (we can have a reusable web component for this?) -->
+      <div id="archive-section" class="settings-page">
+        <h1 class="section-title">Archive</h1>
+
+        <div class="archive-filter-bar">
+          <span class="filter-label">Time</span>
+          <select id="export-time-filter">
+            <option value="15m">Last 15 minutes</option>
+            <option value="1h">Last 1 hour</option>
+            <option value="1d">Last 1 day</option>
+            <option value="1w">Last 1 week</option>
+            <option value="all" selected>All time</option>
+          </select>
+          <div class="filter-actions">
+            <button id="export-archive-btn" class="btn btn-secondary">Export as JSON</button>
+            <button id="clear-archive-btn" class="btn btn-danger">Clear All</button>
+          </div>
+        </div>
+
+        <p class="archive-note">This page is for discoverability of your published P2P data. Archive only clears your history of Hyperdrives/IPFS uploads/ENS lookups. To clear the underlying P2P data (IPFS blocks, Hyperdrive storage, etc.), go to <a href="peersky://settings/search" class="archive-note-link">peersky://settings/search</a> and use Reset P2P Data.</p>
+
+        <div class="archive-subsection">
+          <span class="archive-subsection-label">Hyperdrives</span>
+          <pagination-control id="p2p-data-pagination" search-placeholder="Search by name or key..."></pagination-control>
+        </div>
+
+        <div class="archive-subsection">
+          <span class="archive-subsection-label">Hyper Uploads</span>
+          <pagination-control id="hyper-pagination" search-placeholder="Search by name or key..."></pagination-control>
+        </div>
+
+        <div class="archive-subsection">
+          <span class="archive-subsection-label">IPFS Uploads</span>
+          <pagination-control id="ipfs-pagination" search-placeholder="Search by name or CID..."></pagination-control>
+        </div>
+
+        <div class="archive-subsection">
+          <span class="archive-subsection-label">ENS Cache</span>
+          <pagination-control id="ens-pagination" search-placeholder="Search by name or hash..."></pagination-control>
+        </div>
       </div>
     </main>
   </div>
 </div>
 
 <script src="peersky://static/js/tabs.js" type="module"></script>
+<script src="peersky://static/js/pagination.js" type="module"></script>
+<script src="peersky://static/js/archive.js" defer></script>
 <script src="peersky://static/js/settings.js" defer></script>
+<script>
+  document.getElementById('history-nav-link').addEventListener('click', async (e) => {
+    e.preventDefault();
+    try {
+      const result = await window.electronAPI?.extensions?.listExtensions();
+      const extensions = result?.extensions || [];
+      const historyExt = extensions.find(ext => ext.enabled && ext.electronId && (
+        ext.name?.toLowerCase().includes('history') ||
+        ext.displayName?.toLowerCase().includes('history')
+      ));
+      if (historyExt?.electronId) {
+        window.open(`chrome-extension://${historyExt.electronId}/view.html`);
+      } else {
+        window.open('peersky://history');
+      }
+    } catch (err) {
+      window.open('peersky://history');
+    }
+  });
+</script>
 </body>
 </html> 

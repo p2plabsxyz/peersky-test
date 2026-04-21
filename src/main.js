@@ -1,25 +1,31 @@
-import electron from "electron";
-const { app, protocol: globalProtocol, ipcMain, BrowserWindow, webContents, Menu } = electron;
+import { app, session, protocol as globalProtocol, ipcMain, BrowserWindow, Menu, shell, dialog, webContents} from "electron";
+import { createLogger } from './logger.js';
+import fs from "fs/promises";
+import path from "path";
 import { createHandler as createBrowserHandler } from "./protocols/peersky-protocol.js";
 import { createHandler as createBrowserThemeHandler } from "./protocols/theme-handler.js";
 import { createHandler as createIPFSHandler } from "./protocols/ipfs-handler.js";
 import { createHandler as createHyperHandler } from "./protocols/hyper-handler.js";
+import { createHandler as createHSHandler } from "./protocols/hs-handler.js";
 import { createHandler as createWeb3Handler } from "./protocols/web3-handler.js";
 import { createHandler as createFileHandler } from "./protocols/file-handler.js";
-import { createHandler as createBittorrentHandler } from "./protocols/bittorrent-handler.js";
+import { createHandler as createBittorrentHandler, setupBittorrentIpc } from "./protocols/bittorrent-handler.js";
 import { ipfsOptions, hyperOptions } from "./protocols/config.js";
 import { createMenuTemplate } from "./actions.js";
 import WindowManager from "./window-manager.js";
 import settingsManager from "./settings-manager.js";
+import p2pAppRegistry from "./p2p-app-registry.js";
 import { setWindowManager } from "./context-menu.js";
 import { isBuiltInSearchEngine } from "./search-engine.js";
 import "./llm.js";
-// import { setupAutoUpdater } from "./auto-updater.js";
+import "./llm-memory.js";
+import { setupAutoUpdater } from "./auto-updater.js";
 
 // Import and initialize extension system
 import extensionManager from "./extensions/index.js";
 import { setupExtensionIpcHandlers } from "./extensions/extensions-ipc.js";
 import { getBrowserSession, usePersist } from "./session.js";
+import { setupPermissionHandler } from "./permissions.js";
 
 const P2P_PROTOCOL = {
   standard: true,
@@ -31,8 +37,18 @@ const P2P_PROTOCOL = {
   stream: true,
 };
 
-const BROWSER_PROTOCOL = {
+const WEB3_PROTOCOL = {
   standard: false,
+  secure: true,
+  allowServiceWorkers: true,
+  supportFetchAPI: true,
+  bypassCSP: false,
+  corsEnabled: true,
+  stream: true,
+};
+
+const BROWSER_PROTOCOL = {
+  standard: true,
   secure: true,
   allowServiceWorkers: false,
   supportFetchAPI: true,
@@ -60,7 +76,47 @@ const MAGNET_PROTOCOL = {
   corsEnabled: true,
 };
 
-let windowManager;
+const log = createLogger('main');
+
+let windowManager = null;
+
+const webviewTabShortcutNavAttached = new WeakSet();
+
+function attachWebviewTabShortcutNav(wc) {
+  if (!wc || wc.isDestroyed()) return;
+  if (typeof wc.getType !== "function" || wc.getType() !== "webview") return;
+  if (webviewTabShortcutNavAttached.has(wc)) return;
+  webviewTabShortcutNavAttached.add(wc);
+
+  const runOnShell = (next) => {
+    const win = BrowserWindow.fromWebContents(wc);
+    if (!win || win.isDestroyed()) return;
+    const shellWc = win.webContents;
+    if (shellWc.isDestroyed()) return;
+    const script = next
+      ? `(()=>{try{const t=document.querySelector('#tabbar');if(!t||!t.tabs||t.tabs.length<2)return;const i=t.tabs.findIndex(x=>x.id===t.activeTabId);if(i<0)return;t.selectTab(t.tabs[(i+1)%t.tabs.length].id);}catch(e){console.error(e);}})()`
+      : `(()=>{try{const t=document.querySelector('#tabbar');if(!t||!t.tabs||t.tabs.length<2)return;const i=t.tabs.findIndex(x=>x.id===t.activeTabId);if(i<0)return;t.selectTab(t.tabs[(i-1+t.tabs.length)%t.tabs.length].id);}catch(e){console.error(e);}})()`;
+    shellWc.executeJavaScript(script).catch(() => {});
+  };
+
+  wc.on("before-input-event", (event, input) => {
+    if (input.type !== "keyDown") return;
+
+    const isMac = process.platform === "darwin";
+    let goNext = null;
+    if (isMac) {
+      if (input.meta && input.alt && (input.key === "ArrowRight" || input.key === "ArrowLeft")) {
+        goNext = input.key === "ArrowRight";
+      }
+    } else if (input.control && input.key === "Tab") {
+      goNext = !input.shift;
+    }
+
+    if (goNext === null) return;
+    event.preventDefault();
+    runOnShell(goNext);
+  });
+}
 
 globalProtocol.registerSchemesAsPrivileged([
   { scheme: "peersky", privileges: BROWSER_PROTOCOL },
@@ -69,7 +125,8 @@ globalProtocol.registerSchemesAsPrivileged([
   { scheme: "ipns", privileges: P2P_PROTOCOL },
   { scheme: "pubsub", privileges: P2P_PROTOCOL },
   { scheme: "hyper", privileges: P2P_PROTOCOL },
-  { scheme: "web3", privileges: P2P_PROTOCOL },
+  { scheme: "hs", privileges: P2P_PROTOCOL },
+  { scheme: "web3", privileges: WEB3_PROTOCOL },
   { scheme: "file", privileges: FILE_PROTOCOL },
   { scheme: "bittorrent", privileges: P2P_PROTOCOL },
   { scheme: "bt", privileges: P2P_PROTOCOL },
@@ -78,16 +135,21 @@ globalProtocol.registerSchemesAsPrivileged([
 
 app.whenReady().then(async () => {
   windowManager = new WindowManager();
+  await p2pAppRegistry.init();
+  p2pAppRegistry.setupIpc();
 
   // Set the WindowManager instance in context-menu.js
   setWindowManager(windowManager);
-  
+
   // Get consistent session for protocols and extensions
   const userSession = getBrowserSession();
   await setupProtocols(userSession);
+  installExtensionWebRequestBridge(userSession);
+  setupBittorrentIpc();
 
   // Global webview partition alignment and security hardening
   app.on('web-contents-created', (_e, wc) => {
+    attachWebviewTabShortcutNav(wc);
     wc.on('will-attach-webview', (_event, webPreferences, params) => {
       // Force consistent partition when using persist mode
       if (usePersist()) params.partition = 'persist:peersky';
@@ -99,26 +161,28 @@ app.whenReady().then(async () => {
     });
   });
 
-  // Default-deny permissions for security
-  userSession.setPermissionRequestHandler((_wc, _perm, cb) => cb(false));
+  await setupPermissionHandler(userSession);
 
   // Initialize extension system
   try {
-    console.log("Initializing extension system...");
+    log.info("Initializing extension system...");
     await extensionManager.initialize({ app, session: userSession });
-    console.log("Extension system initialized successfully");
+    log.info("Extension system initialized successfully");
 
     // Setup extension IPC handlers
     setupExtensionIpcHandlers(extensionManager);
-    console.log("Extension IPC handlers registered");
+    log.info("Extension IPC handlers registered");
   } catch (error) {
-    console.error("Failed to initialize extension system:", error);
+    log.error("Failed to initialize extension system:", error);
   }
 
+  // Check for --new-window argument (from Windows taskbar jump list)
+  const hasNewWindowArg = process.argv.includes('--new-window');
+  
   // Load saved windows or open a new one
   await windowManager.openSavedWindows();
-  if (windowManager.all.length === 0) {
-    windowManager.open({ isMainWindow: true });
+  if (windowManager.all.length === 0 || hasNewWindowArg) {
+    windowManager.open({ isMainWindow: windowManager.all.length === 0 });
   }
 
   // Register shortcuts from menu template (NOTE: all these shortcuts works on a window only if a window is in focus)
@@ -130,10 +194,10 @@ app.whenReady().then(async () => {
   const mainWindow = windowManager.all[0];
   if (mainWindow?.window?.webContents) {
     mainWindow.window.webContents.on('did-fail-load', (_e, code, desc, url) =>
-      console.error(JSON.stringify({ evt: 'did-fail-load', code, desc, url }))
+      log.error(JSON.stringify({ evt: 'did-fail-load', code, desc, url }))
     );
     mainWindow.window.webContents.on('render-process-gone', (_e, details) =>
-      console.error(JSON.stringify({ evt: 'render-process-gone', details }))
+      log.error(JSON.stringify({ evt: 'render-process-gone', details }))
     );
 
     // Runtime partition assertion (development only)
@@ -142,15 +206,40 @@ app.whenReady().then(async () => {
       if (partition !== 'persist:peersky') {
         throw new Error(`Session mismatch: expected 'persist:peersky', got '${partition}'`);
       }
-      console.log('[Session] Runtime assertion passed: using persist:peersky');
+      log.info('[Session] Runtime assertion passed: using persist:peersky');
     }
   }
 
   windowManager.startSaver();
 
+  // Setup dock/taskbar menu for "New Window" option
+  if (process.platform === 'darwin') {
+    // macOS dock menu
+    const dockMenu = Menu.buildFromTemplate([
+      {
+        label: 'New Window',
+        click: () => {
+          windowManager.open({ isMainWindow: false });
+        }
+      }
+    ]);
+    app.dock.setMenu(dockMenu);
+  } else if (process.platform === 'win32') {
+    // Windows taskbar jump list
+    app.setUserTasks([
+      {
+        program: process.execPath,
+        arguments: '--new-window',
+        iconPath: process.execPath,
+        iconIndex: 0,
+        title: 'New Window',
+        description: 'Open a new browser window'
+      }
+    ]);
+  }
+
   // Initialize AutoUpdater after windowManager is ready
-  // console.log("App is prepared, setting up AutoUpdater...");
-  // setupAutoUpdater();
+  setupAutoUpdater();
 });
 
 // Introduce a flag to prevent multiple 'before-quit' handling
@@ -162,7 +251,7 @@ app.on("before-quit", async (event) => {
   }
   event.preventDefault(); // Prevent the default quit behavior
 
-  console.log("Before quit: Saving window states...");
+  log.info("Before quit: Saving window states...");
 
   isQuitting = true; // Set the quitting flag
 
@@ -171,20 +260,20 @@ app.on("before-quit", async (event) => {
   // Shutdown extension system
   try {
     await extensionManager.shutdown();
-    console.log("Extension system shutdown successfully");
+    log.info("Extension system shutdown successfully");
   } catch (error) {
-    console.error("Error shutting down extension system:", error);
+    log.error("Error shutting down extension system:", error);
   }
 
   windowManager
     .saveOpened()
     .then(() => {
-      console.log("Window states saved successfully.");
+      log.info("Window states saved successfully.");
       windowManager.stopSaver();
       app.quit(); // Proceed to quit the app
     })
     .catch((error) => {
-      console.error("Error saving window states on quit:", error);
+      log.error("Error saving window states on quit:", error);
       windowManager.stopSaver();
       app.quit(); // Proceed to quit the app even if saving fails
     });
@@ -199,27 +288,31 @@ async function setupProtocols(session) {
   app.setAsDefaultProtocolClient("ipfs");
   app.setAsDefaultProtocolClient("ipns");
   app.setAsDefaultProtocolClient("hyper");
+  app.setAsDefaultProtocolClient("hs");
   app.setAsDefaultProtocolClient("web3");
   app.setAsDefaultProtocolClient("bittorrent");
   app.setAsDefaultProtocolClient("bt");
   app.setAsDefaultProtocolClient("magnet");
 
   const browserProtocolHandler = await createBrowserHandler();
-  sessionProtocol.registerStreamProtocol("peersky", browserProtocolHandler, BROWSER_PROTOCOL);
+  sessionProtocol.handle("peersky", browserProtocolHandler);
 
   const browserThemeHandler = await createBrowserThemeHandler();
-  sessionProtocol.registerStreamProtocol("browser", browserThemeHandler, BROWSER_PROTOCOL);
+  sessionProtocol.handle("browser", browserThemeHandler);
 
   const ipfsProtocolHandler = await createIPFSHandler(ipfsOptions, session);
-  sessionProtocol.registerStreamProtocol("ipfs", ipfsProtocolHandler, P2P_PROTOCOL);
-  sessionProtocol.registerStreamProtocol("ipns", ipfsProtocolHandler, P2P_PROTOCOL);
-  sessionProtocol.registerStreamProtocol("pubsub", ipfsProtocolHandler, P2P_PROTOCOL);
+  sessionProtocol.handle("ipfs", ipfsProtocolHandler);
+  sessionProtocol.handle("ipns", ipfsProtocolHandler);
+  sessionProtocol.handle("pubsub", ipfsProtocolHandler);
 
-  const hyperProtocolHandler = await createHyperHandler(hyperOptions, session);
-  sessionProtocol.registerStreamProtocol("hyper", hyperProtocolHandler, P2P_PROTOCOL);
+  const hyperProtocolHandler = await createHyperHandler(hyperOptions);
+  sessionProtocol.handle("hyper", hyperProtocolHandler);
+
+  const hsProtocolHandler = await createHSHandler();
+  sessionProtocol.handle("hs", hsProtocolHandler);
 
   const web3ProtocolHandler = await createWeb3Handler();
-  sessionProtocol.registerStreamProtocol("web3", web3ProtocolHandler, P2P_PROTOCOL);
+  sessionProtocol.handle("web3", web3ProtocolHandler);
 
   const fileProtocolHandler = await createFileHandler();
   sessionProtocol.handle("file", fileProtocolHandler);
@@ -228,6 +321,149 @@ async function setupProtocols(session) {
   sessionProtocol.handle("bittorrent", bittorrentProtocolHandler);
   sessionProtocol.handle("bt", bittorrentProtocolHandler);
   sessionProtocol.handle("magnet", bittorrentProtocolHandler);
+}
+
+function installExtensionWebRequestBridge(session) {
+  const shouldForwardToExtensions = (rawUrl) => {
+    const url = typeof rawUrl === "string" ? rawUrl : "";
+    if (!url) return false;
+    if (url.startsWith("file://")) return false;
+    if (url.startsWith("chrome-extension://")) return false;
+    try {
+      const proto = new URL(url).protocol;
+      return proto === "http:" || proto === "https:" || proto === "ws:" || proto === "wss:" || proto === "ftp:";
+    } catch (_) {
+      return false;
+    }
+  };
+
+  session.webRequest.onBeforeRequest({ urls: ["<all_urls>"] }, async (details, callback) => {
+    const url = details?.url || "";
+    if (!shouldForwardToExtensions(url)) {
+      callback({});
+      return;
+    }
+    let result = {};
+    try {
+      result =
+        (await extensionManager.electronChromeExtensions?.notifyWebRequestOnBeforeRequest(
+          details,
+        )) ?? {};
+    } catch (e) {
+      console.warn("[webRequest] onBeforeRequest extension dispatch failed:", e?.message);
+    }
+    callback(result);
+  });
+
+  session.webRequest.onBeforeSendHeaders(
+    { urls: ["<all_urls>"] },
+    async (details, callback) => {
+      const url = details?.url || "";
+      if (!shouldForwardToExtensions(url)) {
+        callback({});
+        return;
+      }
+
+      let result = {};
+      try {
+        result =
+          (await extensionManager.electronChromeExtensions?.notifyWebRequestOnBeforeSendHeaders(
+            details,
+          )) ?? {};
+      } catch (e) {
+        console.warn(
+          "[webRequest] onBeforeSendHeaders extension dispatch failed:",
+          e?.message,
+        );
+      }
+
+      callback(result);
+    },
+  );
+
+  session.webRequest.onSendHeaders({ urls: ["<all_urls>"] }, async (details) => {
+    const url = details?.url || "";
+    if (!shouldForwardToExtensions(url)) {
+      return;
+    }
+    try {
+      await extensionManager.electronChromeExtensions?.notifyWebRequestOnSendHeaders(details);
+    } catch (e) {
+      console.warn("[webRequest] onSendHeaders extension dispatch failed:", e?.message);
+    }
+  });
+
+  session.webRequest.onHeadersReceived(
+    { urls: ["<all_urls>"] },
+    async (details, callback) => {
+      const url = details?.url || "";
+      if (!shouldForwardToExtensions(url)) {
+        callback({});
+        return;
+      }
+
+      let result = {};
+      try {
+        result =
+          (await extensionManager.electronChromeExtensions?.notifyWebRequestOnHeadersReceived(
+            details,
+          )) ?? {};
+      } catch (e) {
+        console.warn(
+          "[webRequest] onHeadersReceived extension dispatch failed:",
+          e?.message,
+        );
+      }
+
+      callback(result);
+    },
+  );
+
+  session.webRequest.onResponseStarted({ urls: ["<all_urls>"] }, async (details) => {
+    const url = details?.url || "";
+    if (!shouldForwardToExtensions(url)) {
+      return;
+    }
+    try {
+      await extensionManager.electronChromeExtensions?.notifyWebRequestOnResponseStarted(
+        details,
+      );
+    } catch (e) {
+      console.warn(
+        "[webRequest] onResponseStarted extension dispatch failed:",
+        e?.message,
+      );
+    }
+  });
+
+  session.webRequest.onCompleted({ urls: ["<all_urls>"] }, async (details) => {
+    const url = details?.url || "";
+    if (!shouldForwardToExtensions(url)) {
+      return;
+    }
+    try {
+      await extensionManager.electronChromeExtensions?.notifyWebRequestOnCompleted(details);
+    } catch (e) {
+      console.warn("[webRequest] onCompleted extension dispatch failed:", e?.message);
+    }
+  });
+
+  session.webRequest.onErrorOccurred({ urls: ["<all_urls>"] }, async (details) => {
+    const url = details?.url || "";
+    if (!shouldForwardToExtensions(url)) {
+      return;
+    }
+    try {
+      await extensionManager.electronChromeExtensions?.notifyWebRequestOnErrorOccurred(
+        details,
+      );
+    } catch (e) {
+      console.warn(
+        "[webRequest] onErrorOccurred extension dispatch failed:",
+        e?.message,
+      );
+    }
+  });
 }
 
 app.on("window-all-closed", () => {
@@ -245,12 +481,14 @@ app.on("activate", () => {
 ipcMain.on('remove-all-tempIcon', () => {
   try {
     const windows = BrowserWindow.getAllWindows();
-    const mainWindow = windows.find(w => w && !w.isDestroyed());
-    if (mainWindow && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
-      mainWindow.webContents.send('remove-all-tempIcon');
+    for (const win of windows) {
+      if (!win || win.isDestroyed()) continue;
+      const wc = win.webContents;
+      if (!wc || wc.isDestroyed()) continue;
+      wc.send('remove-all-tempIcon');
     }
   } catch (error) {
-    console.error('Error sending remove-all-tempIcon:', error);
+    log.error('Error sending remove-all-tempIcon:', error);
   }
 });
 
@@ -264,7 +502,7 @@ ipcMain.on('refresh-browser-actions', () => {
       wc.send('refresh-browser-actions');
     }
   } catch (error) {
-    console.error('Error sending refresh-browser-actions:', error);
+    log.error('Error sending refresh-browser-actions:', error);
   }
 });
 
@@ -295,25 +533,11 @@ ipcMain.on("window-control", (_event, command) => {
   }
 });
 
-// IPC handler for moving tabs to new window
-ipcMain.on('new-window-with-tab', (_event, tabData) => {
-  // Create new window using WindowManager for proper persistence
-  windowManager.open({
-    url: tabData.url,
-    newWindow: true,
-    isolate: true,
-    singleTab: {
-      url: tabData.url,
-      title: tabData.title
-    }
-  });
-});
-
 // IPC handler for opening files in new tabs (used by BitTorrent pages)
 ipcMain.on('open-url-in-tab', (event, fileUrl) => {
   // Security: only allow file:// URLs
   if (typeof fileUrl !== 'string' || !fileUrl.startsWith('file://')) {
-    console.warn('[IPC] open-url-in-tab blocked non-file URL:', fileUrl);
+    log.warn('[IPC] open-url-in-tab blocked non-file URL:', fileUrl);
     return;
   }
   
@@ -358,13 +582,55 @@ ipcMain.handle('get-tab-memory-usage', async (event, webContentsId) => {
     return null;
   }
   catch (error) {
-    console.error(`Error getting memory usage for webContents ID ${webContentsId}:`, error);
+    log.error(`Error getting memory usage for webContents ID ${webContentsId}:`, error);
     return null;
   }
 });
 
+// IPC handler to check if a specific webContents is currently playing audio
+ipcMain.on('is-webcontents-audible', (event, webContentsId) => {
+  try {
+    const wc = webContents.fromId(webContentsId);
+    event.returnValue = wc ? wc.isCurrentlyAudible() : false;
+  } catch (error) {
+    console.error(`Error checking audibility for webContents ID ${webContentsId}:`, error);
+    event.returnValue = false;
+  }
+});
+
+ipcMain.on('get-tab-navigation', (event, webContentsId) => {
+  try {
+    const wc = webContents.fromId(webContentsId);
+    if (!wc || !wc.navigationHistory) {
+      event.returnValue = null;
+      return;
+    }
+
+    const entries = [];
+    const length = wc.navigationHistory.length();
+    for (let i = 0; i < length; i++) {
+      const entry = wc.navigationHistory.getEntryAtIndex(i);
+      entries.push({ url: entry.url, title: entry.title });
+    }
+
+    event.returnValue = {
+      entries,
+      activeIndex: wc.navigationHistory.getActiveIndex()
+    };
+  } catch (error) {
+    log.error(`Error getting navigation history for webContents ID ${webContentsId}:`, error);
+    event.returnValue = null;
+  }
+});
+
+// Electron cannot natively overwrite a WebContents history stack after recreation,
+// so the fallback is handled in the UI layer (savedNavigation on the tab object).
+ipcMain.handle('restore-navigation-history', async (_event, _data) => {
+  return { success: true, note: 'Native history rewrite not supported; relying on UI fallback.' };
+});
+
 ipcMain.on('group-action', (_event, data) => {
-  console.log('Group action received:', data);
+  log.info('Group action received:', data);
   const { action, groupId } = data;
   
   // Broadcast to all windows
@@ -378,7 +644,7 @@ ipcMain.on('group-action', (_event, data) => {
 });
 
 ipcMain.on('update-group-properties', (_event, groupId, properties) => {
-  console.log('Updating group properties across all windows:', groupId, properties);
+  log.info('Updating group properties across all windows:', groupId, properties);
   
   // Broadcast to all windows
   windowManager.all.forEach(peerskyWindow => {
@@ -391,8 +657,42 @@ ipcMain.handle('check-built-in-engine', (event, template) => {
   try {
     return isBuiltInSearchEngine(template);
   } catch (error) {
-    console.error('Error in check-built-in-engine:', error);
+    log.error('Error in check-built-in-engine:', error);
     return false; // fallback if anything goes wrong
   }
 });
+
+ipcMain.handle('p2pmd-print-to-pdf', async (event, { html, fileName } = {}) => {
+  const parentWindow = BrowserWindow.fromWebContents(event.sender);
+  const safeName = typeof fileName === "string" && fileName.trim() ? fileName : "p2pmd-document.pdf";
+  const { canceled, filePath } = await dialog.showSaveDialog(parentWindow, {
+    defaultPath: path.join(app.getPath("downloads"), safeName),
+    filters: [{ name: "PDF", extensions: ["pdf"] }]
+  });
+  if (canceled || !filePath) {
+    return { canceled: true };
+  }
+  const printWindow = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      sandbox: false,
+      contextIsolation: true
+    }
+  });
+  try {
+    const dataUrl = `data:text/html;charset=utf-8,${encodeURIComponent(html || "")}`;
+    await printWindow.loadURL(dataUrl);
+    const pdfBuffer = await printWindow.webContents.printToPDF({
+      printBackground: true,
+      preferCSSPageSize: true
+    });
+    await fs.writeFile(filePath, pdfBuffer);
+    return { canceled: false, filePath };
+  } finally {
+    if (!printWindow.isDestroyed()) {
+      printWindow.close();
+    }
+  }
+});
+
 export { windowManager };
