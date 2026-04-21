@@ -32,6 +32,8 @@
   /* Context Menu Icons */
   --context-menu-icon-filter: brightness(0) saturate(100%) invert(88%) sepia(79%) saturate(2476%) hue-rotate(86deg) brightness(118%) contrast(119%);
   --context-menu-icon-hover-filter: brightness(0) saturate(100%) invert(100%) sepia(0%) saturate(0%) hue-rotate(0deg) brightness(100%) contrast(100%);
+  --pagination-icon-filter: invert(1) brightness(0.85);
+  --pagination-icon-filter-hover: invert(1) brightness(1.2);
 
   .nav-icon {
     filter: brightness(0) invert(1) drop-shadow(0.25px 0.25px 0 white);
@@ -71,6 +73,8 @@
   /* Context Menu Icons */
   --context-menu-icon-filter: brightness(0) saturate(100%) invert(88%) sepia(79%) saturate(2476%) hue-rotate(86deg) brightness(118%) contrast(119%);
   --context-menu-icon-hover-filter: brightness(0) saturate(100%) invert(100%) sepia(0%) saturate(0%) hue-rotate(0deg) brightness(100%) contrast(100%);
+  --pagination-icon-filter: invert(1) brightness(0.85);
+  --pagination-icon-filter-hover: invert(1) brightness(1.2);
 }
 
 /* Light Theme */
@@ -106,6 +110,8 @@
   /* Context Menu Icons - Dark icons for light theme */
   --context-menu-icon-filter: brightness(0) saturate(100%) invert(20%) sepia(0%) saturate(0%) hue-rotate(0deg) brightness(95%) contrast(95%);
   --context-menu-icon-hover-filter: brightness(0) saturate(100%) invert(100%) sepia(0%) saturate(0%) hue-rotate(0deg) brightness(100%) contrast(100%);
+  --pagination-icon-filter: invert(0) brightness(0.2);
+  --pagination-icon-filter-hover: invert(0) brightness(0);
 }
 
 /* Cyan Theme */
@@ -141,6 +147,8 @@
   /* Context Menu Icons */
   --context-menu-icon-filter: brightness(0) saturate(100%) invert(25%) sepia(100%) saturate(1500%) hue-rotate(180deg) brightness(90%) contrast(110%);
   --context-menu-icon-hover-filter: brightness(0) saturate(100%) invert(100%) sepia(0%) saturate(0%) hue-rotate(0deg) brightness(100%) contrast(100%);
+  --pagination-icon-filter: brightness(0) saturate(100%) invert(15%) sepia(60%) saturate(800%) hue-rotate(170deg) brightness(80%);
+  --pagination-icon-filter-hover: brightness(0) saturate(100%) invert(10%) sepia(80%) saturate(1200%) hue-rotate(170deg) brightness(70%);
 }
 
 /* Green Theme */
@@ -176,6 +184,9 @@
   /* Context Menu Icons */
   --context-menu-icon-filter: brightness(0) saturate(100%) invert(25%) sepia(100%) saturate(1200%) hue-rotate(90deg) brightness(85%) contrast(120%);
   --context-menu-icon-hover-filter: brightness(0) saturate(100%) invert(100%) sepia(0%) saturate(0%) hue-rotate(0deg) brightness(100%) contrast(100%);
+  /* Pagination icons — green (light) theme: dark green icons */
+  --pagination-icon-filter: brightness(0) saturate(100%) invert(25%) sepia(100%) saturate(800%) hue-rotate(90deg) brightness(70%);
+  --pagination-icon-filter-hover: brightness(0) saturate(100%) invert(15%) sepia(100%) saturate(1200%) hue-rotate(90deg) brightness(60%);
 }
 
 /* Yellow Theme */
@@ -211,6 +222,9 @@
   /* Context Menu Icons */
   --context-menu-icon-filter: brightness(0) saturate(100%) invert(25%) sepia(100%) saturate(1500%) hue-rotate(30deg) brightness(80%) contrast(130%);
   --context-menu-icon-hover-filter: brightness(0) saturate(100%) invert(100%) sepia(0%) saturate(0%) hue-rotate(0deg) brightness(100%) contrast(100%);
+  /* Pagination icons — yellow (light) theme: dark amber icons */
+  --pagination-icon-filter: brightness(0) saturate(100%) invert(20%) sepia(80%) saturate(1200%) hue-rotate(25deg) brightness(70%);
+  --pagination-icon-filter-hover: brightness(0) saturate(100%) invert(15%) sepia(100%) saturate(1800%) hue-rotate(25deg) brightness(60%);
 }
 
 /* Violet Theme */
@@ -246,6 +260,9 @@
   /* Context Menu Icons */
   --context-menu-icon-filter: brightness(0) saturate(100%) invert(25%) sepia(100%) saturate(1300%) hue-rotate(270deg) brightness(85%) contrast(115%);
   --context-menu-icon-hover-filter: brightness(0) saturate(100%) invert(100%) sepia(0%) saturate(0%) hue-rotate(0deg) brightness(100%) contrast(100%);
+  /* Pagination icons — violet (light) theme: dark purple icons */
+  --pagination-icon-filter: brightness(0) saturate(100%) invert(15%) sepia(60%) saturate(1000%) hue-rotate(260deg) brightness(70%);
+  --pagination-icon-filter-hover: brightness(0) saturate(100%) invert(10%) sepia(80%) saturate(1500%) hue-rotate(260deg) brightness(60%);
 }
 
 /* Disable transitions temporarily during page load */
@@ -303,4 +320,88 @@ label,
 pre,
 code {
   transition: background-color 0.12s ease-in-out, color 0.12s ease-in-out, border-color 0.12s ease-in-out;
+}
+
+.tab.split-left, 
+.tab.split-right, 
+.tab.split-pending {
+  flex: 0.5 !important;
+  max-width: 140px !important; 
+  min-width: 80px !important;
+  background-color: var(--settings-bg-secondary) !important; 
+  border: 1px solid var(--settings-border) !important;
+  transition: background-color 0.2s, border-color 0.2s;
+}
+
+.tab.split-left {
+  border-top-right-radius: 0 !important;
+  border-bottom-right-radius: 0 !important;
+  border-right: none !important;
+  margin-right: 0 !important;
+}
+
+.tab.split-right {
+  border-top-left-radius: 0 !important;
+  border-bottom-left-radius: 0 !important;
+  margin-left: 0 !important;
+  border-left: 1px solid var(--settings-border) !important;
+}
+
+.tab.split-left.active, 
+.tab.split-right.active, 
+.tab.split-pending.active {
+  background-color: var(--browser-theme-secondary-highlight) !important;
+  border-color: var(--browser-theme-secondary-highlight) !important;
+  color: #ffffff !important;
+  z-index: 2;
+}
+
+.tab.split-left.active .tab-title,
+.tab.split-right.active .tab-title,
+.tab.split-pending.active .tab-title {
+  color: #ffffff !important;
+}
+
+.tab.split-left.active .close-tab,
+.tab.split-right.active .close-tab,
+.tab.split-pending.active .close-tab {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.tab.split-left.active .close-tab:hover,
+.tab.split-right.active .close-tab:hover,
+.tab.split-pending.active .close-tab:hover {
+  color: #ffffff;
+  background-color: rgba(255, 255, 255, 0.2);
+}
+
+.split-view-divider {
+  width: 6px;
+  background-color: transparent;
+  cursor: col-resize;
+  z-index: 10;
+  position: relative;
+  transition: background-color 0.2s;
+  margin-left: -3px; 
+  margin-right: -3px;
+}
+
+.split-view-divider::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 2px;
+  background-color: var(--settings-border);
+  transition: background-color 0.2s;
+}
+
+.split-view-divider:hover::after,
+.split-view-divider.dragging::after {
+  background-color: var(--browser-theme-primary-highlight);
+}
+
+.split-view-divider.dragging {
+  cursor: col-resize !important;
 }

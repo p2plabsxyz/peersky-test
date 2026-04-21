@@ -378,6 +378,9 @@ export function setupExtensionIpcHandlers(extensionManager) {
         }
 
         const senderWindow = BrowserWindow.fromWebContents(event.sender);
+
+        if (senderWindow && !senderWindow.isDestroyed()) senderWindow.focus();
+        
         await extensionManager.clickBrowserAction(actionId, senderWindow);
         return { success: true };
       } catch (error) {
@@ -398,7 +401,9 @@ export function setupExtensionIpcHandlers(extensionManager) {
         }
 
         const senderWindow = BrowserWindow.fromWebContents(event.sender);
-        
+
+        if (senderWindow && !senderWindow.isDestroyed()) senderWindow.focus();
+
         // Validate anchorRect has required fields
         const safeRect = anchorRect && typeof anchorRect === "object" ? {
           x: Number(anchorRect.x) || 100,
@@ -445,6 +450,57 @@ export function setupExtensionIpcHandlers(extensionManager) {
         return { success: true };
       } catch (error) {
         console.error(`[ExtensionIPC] extensions-register-webview failed:`, error);
+        return {
+          success: false,
+          code: error.code || "E_UNKNOWN",
+          error: error.message
+        };
+      }
+    });
+
+    // Pin currently active webview as the "active tab" for extensions.
+    // Needed so popups can reliably resolve tabs.query({active:true,currentWindow:true})
+    // after tab switches, not only when the popup opens.
+    ipcMain.handle("extensions-pin-active-webview", async (event, webContentsId) => {
+      try {
+        if (!webContentsId || typeof webContentsId !== "number") {
+          throw Object.assign(new Error("Invalid webContents ID"), { code: ERR.E_INVALID_ID });
+        }
+
+        const { webContents } = await import("electron");
+        const webviewContents = webContents.fromId(webContentsId);
+        if (!webviewContents) {
+          throw Object.assign(new Error("WebContents not found"), { code: ERR.E_INVALID_ID });
+        }
+
+        // Verify ownership/embedding relationship
+        const host = webviewContents.hostWebContents || BrowserWindow.fromWebContents(webviewContents)?.webContents;
+        if (!host || (host.id !== event.sender.id && BrowserWindow.fromWebContents(webviewContents) !== BrowserWindow.fromWebContents(event.sender))) {
+          throw Object.assign(new Error("WebContents not owned by sender"), { code: ERR.E_INVALID_ID });
+        }
+
+        const senderWindow = BrowserWindow.fromWebContents(event.sender);
+        // Ensure it's registered
+        extensionManager.addWindow(senderWindow, webviewContents);
+
+        // Pin focus/active tab context inside ECE
+        try {
+          const ece = extensionManager.electronChromeExtensions;
+          const store = ece?.ctx?.store;
+          if (ece && store && senderWindow && !senderWindow.isDestroyed()) {
+            
+            store.lastFocusedWindowId = senderWindow.id;
+            if (!store.tabs?.has?.(webviewContents)) {
+              try { ece.addTab(webviewContents, senderWindow); } catch (_) { }
+            }
+            try { store.windowToActiveTab?.set?.(senderWindow, webviewContents); } catch (_) { }
+            try { ece.selectTab(webviewContents, senderWindow); } catch (_) { }
+          }
+        } catch (_) { /* ignore for now */ }
+
+        return { success: true };
+      } catch (error) {
+        console.error(`[ExtensionIPC] extensions-pin-active-webview failed:`, error);
         return {
           success: false,
           code: error.code || "E_UNKNOWN",

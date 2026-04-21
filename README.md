@@ -11,7 +11,7 @@
     <!-- <img src="https://img.shields.io/github/v/release/p2plabsxyz/peersky-browser?color=green" alt="GitHub Release"> -->
     <a href="https://mastodon.social/@peersky"><img src="https://img.shields.io/mastodon/follow/113323887574214930" alt="Mastodon Follow"></a>
     <a href="https://deepwiki.com/p2plabsxyz/peersky-browser"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
-    <img src="/banner.gif" width="639" alt="A demo gif of the PeerSky P2P Editor showing HTML, CSS, and JavaScript panels, a live preview of a blue page with red ‘Spider-Man’ text, and AI code-generation controls">
+    <img src="/demo.png" width="800" alt="PeerSky Browser home page">
 </div>
 
 💻 [Download](https://peersky.p2plabs.xyz/)
@@ -73,12 +73,18 @@
 
 - [x] P2P Applications:
 
-  - [x] `peersky://p2p/chat/`
+  - [x] `peersky://p2p/peerchat/`
     - Peer-to-peer messaging over Hyper
   - [x] `peersky://p2p/upload/`
     - Decentralized file storage
-  - [x] `peersky://p2p/editor/`
+  - [x] `peersky://p2p/peerpad/`
     - Build and publish websites
+  - [x] `peersky://p2p/p2pmd/`
+    - Real-time collaborative markdown editor
+    - Presentation slides mode with speaker notes
+    - AI-powered content generation
+    - Publish to IPFS/Hypercore
+    - Peers dashboard with roles, live editing status, and edit history
   - [x] `peersky://p2p/wiki/`
     - Browse Wikipedia over IPFS
   - [x] [reader.p2plabs.xyz](https://reader.distributed.press/)
@@ -130,14 +136,14 @@
   - [x] Trusted-domain exposure (PeerSky-native + allowlist)
   - [x] AI Chat app (peersky://p2p/ai-chat/)
     - [x] Ported from [Agregore examples](https://github.com/AgregoreWeb/website/blob/main/docs/examples/llm-chat.html) with PeerSky updates
-  - [x] P2P Editor integration (peersky://p2p/editor/)
+  - [x] P2P Editor integration (peersky://p2p/peerpad/)
     - [x] New AI generator (`ai-generator.js`) to generate code with AI
 
-  - [ ] 🚧 [LLM Memory](https://github.com/p2plabsxyz/peersky-browser/issues/97)
-    - [ ] `llm.json` to store prompts/responses across P2P apps
-    - [ ] Reusable History component (P2P editor, AI chat, etc.)
-    - [ ] Settings toggle to enable/disable memory
-    - [ ] “Reset P2P Data” also clears `llm.json`
+  - [x] [LLM Memory](https://github.com/p2plabsxyz/peersky-browser/issues/97)
+    - [x] `llm.json` to store prompts/responses across P2P apps
+    - [x] Reusable History component (P2P editor, AI chat, etc.)
+    - [x] Settings toggle to enable/disable memory
+    - [x] “Reset P2P Data” also clears `llm.json`
 
 - [x] [Web extensions](https://github.com/p2plabsxyz/peersky-browser/issues/19):
   - [x] Ability to add and manage extensions
@@ -152,13 +158,14 @@
 
   - [x] Option to generate QR Code for every page in the URL prompt with [plan1](./docs/Plan1.md).
 
-- [ ] Archive (peersky://archive):
+- [x] Archive (peersky://archive):
 
-  - [ ] List and showcase published content from `peersky://p2p/` apps for enhanced discoverability.
-  - [ ] Provide metadata (e.g., creation date, content type) to improve navigation and usability.
-  - [ ] Ability to download all the hashes of published data in a .json file.
+  - [x] List and showcase published content from `peersky://p2p/` apps for enhanced discoverability.
+  - [x] Provide metadata (e.g., creation date, content type) to improve navigation and usability.
+  - [x] Ability to download all the hashes of published data in a .json file.
 
 ## Development
+
 
 ### Node.js and npm Setup
 
@@ -196,6 +203,11 @@ npm run build-all
 ```
 
 Now, the `dist` folder will appear in the root directory.
+
+### Logging
+
+For details on the Peersky logging system, see the [Logging Documentation](./docs/Logging.md). 
+
 
 ## Contribute
 

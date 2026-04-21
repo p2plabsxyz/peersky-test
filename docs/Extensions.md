@@ -4,17 +4,20 @@
 
 PeerSky’s `peersky://extensions` page is the control center for managing browser extensions. You can install from the Chrome Web Store or local files, enable/disable, update, uninstall, and see toolbar actions for supported extensions.
 
+> **Note:** Not all Chrome extension APIs are supported yet (for example `chrome.debugger`, `chrome.identity`, `chrome.proxy`, `chrome.storage.sync`, and some `chrome.webRequest` behaviors). For an up‑to‑date list and roadmap, see [⚠️ Chrome Extension API Limitations in Peersky](https://github.com/p2plabsxyz/peersky-browser/issues/125).
+
 ![Extensions Management](./images/peersky-extensions-management.png)
 
 Highlights
-- Three MV3 extensions ship preinstalled (Dark Reader, Linguist - web page translator, uBlock Origin Lite) on first launch; they stay installed but can be disabled any time.
+- Six MV3 extensions ship preinstalled (Dark Reader, Linguist, PeerSky History, Consent Autodeny, Ghostery, Wayback Machine) on first launch; they stay installed but can be disabled any time.
+- **PeerSky History** (`peersky://history`) provides local-first browsing history with full-text search, accessible via the extension or directly at `peersky://history`.
 - Context-isolated preload exposes only what this page needs, keeping privileged APIs out of `peersky://extensions`.
 - Browser actions integrate with the toolbar/puzzle menu, support pinning up to six entries.
 
 ## 2. User Guide
 
 Quick start
-- Preinstalled: three trusted extensions (Dark Reader, Linguist - web page translator, uBlock Origin Lite) ship enabled and can be disabled but not removed.
+- Preinstalled: six trusted extensions ship enabled and can be disabled but not removed: https://github.com/p2plabsxyz/essential-chromium-extensions
 - Install from Web Store: paste a Chrome Web Store URL, a `?id=` link, or the raw 32-character ID → Install.
 - Install from file: drag/drop a `.zip`, `.crx`, `.crx3` or use Choose File.
 
@@ -23,8 +26,6 @@ Common actions
 - Update: click Update All (Web Store installs only).
 - Uninstall (non-preinstalled only): click Remove and confirm.
 - Toolbar actions: appear under the puzzle menu; up to 6 can be pinned for quick access.
-
-![Pinned extensions menu showing pin/unpin options](./images/peersky-pinned-extensions.png)
 
 Pinning rules
 - Cap stays at six to keep the puzzle menu within 320 px and avoid cramped hover targets.
@@ -35,6 +36,33 @@ Icons
 - Served via `peersky://extension-icon/<id>/<size>` from the latest installed version.
 - A default SVG is used when no icon is found.
 
+### PeerSky History Extension
+
+**PeerSky History** is a custom-built extension that provides local-first browsing history with full-text search capabilities.
+
+![Peersky History Extension](./images/peersky-history-extension.png)
+
+**Key Features:**
+- **Local-first storage** - All history data stored locally using IndexedDB
+- **Full-text search** - Search through page titles, URLs, and content
+- **Privacy-focused** - No cloud sync, no tracking, data never leaves your device
+- **Direct access** - Available at `peersky://history` or via extension popup
+- **Integration** - Exposes `globalThis.search()` API for address bar autocomplete
+
+**Technical Details:**
+- **Repository:** https://github.com/p2plabsxyz/extension-peersky-history
+- **Storage:** IndexedDB via extension's background service worker
+- **Search API:** Async generator function `globalThis.search(query, maxResults, signal)`
+- **Address bar integration:** Nav-box queries history via `history-search` IPC channel
+- **Version:** 1.1.0 (preinstalled)
+
+**Usage:**
+1. Browse normally - history is automatically recorded
+2. Access via `peersky://history` to view and search full history
+3. Use address bar autocomplete (powered by PeerSky History search)
+4. Click extension icon for quick access to recent history
+
+**Privacy Note:** All history data is stored locally in your browser's user data directory and is never transmitted to external servers.
 
 ## 3. Electron Integration: Why Preload + IPC
 
@@ -138,25 +166,24 @@ Lifecycle
 
 Preinstalled extensions
 Preinstalled packages are imported on first launch, marked `isSystem: true` and `removable: false`, and ride the normal update track. Disablement is still allowed so users can opt out.
-1. Drop the MV3 package in `src/extensions/preinstalled-extensions/` (either unpacked directory or `.zip` archive) and ensure its `manifest.json` lives at the top level.
-2. Run `node scripts/postinstall.js` (or reinstall dependencies) to regenerate `preinstalled.json` when working with directories—this calculates deterministic IDs.
-3. If you store archives, add or update the matching entry in `preinstalled.json` with `archive`, `name`, `version`, and the generated `id`.
+1. Drop the MV3 package in `src/extensions/preinstalled-extensions/` as a `.zip` archive and ensure its `manifest.json` lives at the top level (not nested in a subdirectory).
+2. Run `node scripts/postinstall.js` to download extensions from Chrome Web Store or GitHub releases and update `preinstalled.json` with archive filenames.
+3. Add or update entries in `preinstalled.json` with `archive`, `name`, `version`, and optionally `id` (for Web Store extensions) or `url` (for custom releases).
 4. Launch the browser once to verify the package is imported and marked `isSystem`/`removable: false`.
 
 Validation & security
 - `policy.js`: MV3 default, file allow/deny lists, size caps, behavior.
 - `manifest-validator.js`: required fields, semantic versioning, permission/host risk checks, Web Store URL allowlist.
-- `zip.js`/`crx.js`: safe extraction and CRX parsing; optional key recovery via `chrome-extension-fetch`.
+- `zip.js`/`crx.js`: safe extraction and CRX parsing. Preinstalled extensions use `.zip` only; `.crx` is supported for manual installs via drag-and-drop or file picker.
 - Session hardening: `contextIsolation=true`, `sandbox=true`, no Node integration in webviews.
 
 ## 6. MV3 & Permissions
 
-- MV3 service workers ride on `electron-chrome-extensions`; they go idle after Chromium's ~30 s timer and wake on events, alarms, or network listeners. We do not pin them alive.
+- MV3 service workers ride on [`@p2plabs/peersky-chrome-extensions`](https://www.npmjs.com/package/@p2plabs/peersky-chrome-extensions) (PCE); they go idle after Chromium's ~30 s timer and wake on events, alarms, or network listeners. We do not pin them alive.
 - Browser-action popups run in dedicated windows; `popup-guards` redirect `window.open`/`will-navigate` to real tabs so OAuth flows stay in trusted chrome.
 - Manifest `permissions` and `host_permissions` are validated at install. Risky hosts (`*://*/*`, LAN ranges, etc.) surface warnings in `extension.warnings` for UI review.
 - Optional permission prompts (`chrome.permissions.request`) are currently blocked; calls reject with `E_INVALID_STATE` so extensions must declare needed hosts up front.
 - Runtime host-permission reviews are manual today—disable the extension or uninstall if the warning set looks unsafe.
-
 
 ## 7. File Reference
 

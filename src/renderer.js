@@ -11,6 +11,7 @@ const chromiumNetErrors = require('chromium-net-errors');
 const { ipcRenderer } = require("electron");
 
 const DEFAULT_PAGE = "peersky://home";
+const isHomePage = (url) => url === "peersky://home" || url === "peersky://home/";
 let webviewContainer = null; // Will be set dynamically for tabs
 let tabBar; // Holds current tab bar component
 const nav = document.querySelector("#navbox");
@@ -45,10 +46,28 @@ function setupWebviewErrorHandling(webview) {
   if (!webview || webview._errorHandlerInitialized) return;
   webview._errorHandlerInitialized = true;
 
+  const isLocalUrl = (value) => {
+    try {
+      const { hostname } = new URL(value);
+      if (!hostname) return false;
+      if (hostname === "localhost" || hostname === "0.0.0.0") return true;
+      if (hostname.startsWith("127.")) return true;
+      if (hostname.startsWith("10.")) return true;
+      if (hostname.startsWith("192.168.")) return true;
+      if (hostname.startsWith("172.")) {
+        const second = Number(hostname.split(".")[1]);
+        return Number.isFinite(second) && second >= 16 && second <= 31;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  };
+
   const state = {
     isShowingError: false,
-    abortTimeout: null,
-    lastFailedUrl: null
+    lastFailedUrl: null,
+    retryCounts: new Map()
   };
 
   const handleFailLoad = (event) => {
@@ -65,25 +84,45 @@ function setupWebviewErrorHandling(webview) {
     
     if (state.isShowingError && state.lastFailedUrl === validatedURL) return;
 
-    if (state.abortTimeout) {
-      clearTimeout(state.abortTimeout);
-      state.abortTimeout = null;
+    // ERR_ABORTED: navigation was cancelled, usually because another navigation
+    // replaced it (redirect chains, OAuth). Not a terminal failure—do not show
+    // an error page; the active navigation will emit its own result.
+    if (errorCode === -3) {
+      return;
     }
 
-    // Handle ERR_ABORTED - wait for real error
-    if (errorCode === -3) {
-      state.lastFailedUrl = validatedURL;
-      state.abortTimeout = setTimeout(() => {
-        if (!state.isShowingError) {
-          showErrorPage({
-            code: '-3',
-            name: 'Request Aborted',
-            msg: 'The connection was aborted',
-            url: validatedURL || ''
-          });
+    // Extension OAuth redirect host: Chrome resolves *.chromiumapp.org internally;
+    // Electron performs a real DNS lookup → ERR_NAME_NOT_RESOLVED. Do not replace
+    // the tab with peersky://error; return to the prior page (session is often already established).
+    if (errorCode === -105 && validatedURL) {
+      try {
+        const { hostname } = new URL(validatedURL);
+        if (hostname.endsWith('.chromiumapp.org')) {
+          setTimeout(() => {
+            try {
+              if (typeof webview.canGoBack === 'function' && webview.canGoBack()) {
+                webview.goBack();
+              }
+            } catch (_) { /* ignore */ }
+          }, 0);
+          return;
         }
-      }, 300);
-      return;
+      } catch (_) { /* ignore invalid URL */ }
+    }
+
+    if (errorCode === -102 && validatedURL && isLocalUrl(validatedURL)) {
+      const count = state.retryCounts.get(validatedURL) || 0;
+      if (count < 1) {
+        state.retryCounts.set(validatedURL, count + 1);
+        setTimeout(() => {
+          try {
+            if (webview.src === validatedURL) {
+              webview.src = validatedURL;
+            }
+          } catch (e) {}
+        }, 3000);
+        return;
+      }
     }
 
     // Get Chromium error details
@@ -125,9 +164,8 @@ function setupWebviewErrorHandling(webview) {
     if (!url.includes('error.html')) {
       state.isShowingError = false;
       state.lastFailedUrl = null;
-      if (state.abortTimeout) {
-        clearTimeout(state.abortTimeout);
-        state.abortTimeout = null;
+      if (url) {
+        state.retryCounts.delete(url);
       }
     }
   };
@@ -137,10 +175,6 @@ function setupWebviewErrorHandling(webview) {
     if (currentSrc && !currentSrc.includes('error.html') &&
         currentSrc !== state.lastFailedUrl) {
       state.isShowingError = false;
-      if (state.abortTimeout) {
-        clearTimeout(state.abortTimeout);
-        state.abortTimeout = null;
-      }
     }
   };
 
@@ -260,8 +294,15 @@ document.addEventListener("DOMContentLoaded", async () => {
   
   ipcRenderer.on("remove-all-tempIcon", () => {
     const navBox = document.querySelector("nav-box");
-    if (navBox && typeof navBox.renderBrowserActions === "function") {
+    if (navBox && typeof navBox.removeAllTempIcon === "function") {
       navBox.removeAllTempIcon();
+    }
+  });
+
+  ipcRenderer.on("remove-tempIcon", (_event, extensionId) => {
+    const navBox = document.querySelector("nav-box");
+    if (navBox && typeof navBox.removeTempIconForExtension === "function") {
+      navBox.removeTempIconForExtension(extensionId);
     }
   });
 
@@ -373,14 +414,14 @@ document.addEventListener("DOMContentLoaded", async () => {
       const activeTab = tabBar.getActiveTab();
       const urlInput = nav.querySelector("#url");
       if (activeTab && urlInput) {
-        if (activeTab.url === "peersky://home") {
+        if (isHomePage(activeTab.url)) {
           urlInput.value = "";
         } else {
           urlInput.value = activeTab.url;
         }
         
         // Also update the nav display
-        nav.setStyledUrl(activeTab.url === "peersky://home" ? "" : activeTab.url);
+        nav.setStyledUrl(isHomePage(activeTab.url) ? "" : activeTab.url);
       }
     }, 300);
     
@@ -398,7 +439,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const { tabId, url } = e.detail;
     
     // Hide peersky://home URL, show all others
-    if (url === "peersky://home") {
+    if (isHomePage(url)) {
       nav.setStyledUrl("");
     } else {
       nav.setStyledUrl(url);
@@ -422,7 +463,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     
     if (tabId === tabBar.activeTabId) {
       // Hide peersky://home URL, show all others
-      if (url === "peersky://home") {
+      if (isHomePage(url)) {
         nav.setStyledUrl("");
       } else {
         nav.setStyledUrl(url);
@@ -511,7 +552,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Update URL input with active tab's URL and bookmark icon
     const activeTab = tabBar.getActiveTab();
     if (activeTab && nav.querySelector("#url")) {
-      nav.querySelector("#url").value = activeTab.url;
+      // Hide peersky://home URL, show all others
+      nav.querySelector("#url").value = isHomePage(activeTab.url) ? "" : activeTab.url;
       // Update bookmark icon for initial tab
       if (activeTab.url) {
         updateBookmarkIcon(activeTab.url);
@@ -525,7 +567,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     nav.addEventListener("stop", () => tabBar.stopActiveTab());
     nav.addEventListener("home", async () => {
       await navigateTo("peersky://home");
-      nav.querySelector("#url").value = "peersky://home";
+      // Hide peersky://home URL in address bar
+      nav.querySelector("#url").value = "";
     });
     
     nav.addEventListener("navigate", async ({ detail }) => {
@@ -668,7 +711,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     webviewContainer.addEventListener("did-navigate", (e) => {
       if (nav) {
         // Hide peersky://home URL, show all others
-        if (e.detail.url === "peersky://home") {
+        if (isHomePage(e.detail.url)) {
           nav.setStyledUrl("");
         } else {
           nav.setStyledUrl(e.detail.url);
@@ -757,14 +800,26 @@ async function navigateTo(url) {
   }
 }
 
-function updateNavigationButtons(tabBar) {
+function updateNavigationButtons(currentTabBar) {
   if (!nav) return;
   
+  const bar = currentTabBar || tabBar || document.querySelector("#tabbar") || document.querySelector("vertical-tabs");
+  if (!bar) return;
+
   try {
-    const webview = tabBar.getActiveWebview();
+    const webview = bar.getActiveWebview();
+    const tab = (typeof bar.getActiveTab === 'function') ? bar.getActiveTab() : null;
+    
     if (webview) {
-      const canGoBack = webview.canGoBack();
-      const canGoForward = webview.canGoForward();
+      let canGoBack = webview.canGoBack();
+      let canGoForward = webview.canGoForward();
+      
+      // Fallback to saved navigation completely overriding native history
+      if (tab && tab.savedNavigation && tab.savedNavigation.entries && tab.savedNavigation.entries.length > 0) {
+        canGoBack = tab.savedNavigation.activeIndex > 0;
+        canGoForward = tab.savedNavigation.activeIndex < tab.savedNavigation.entries.length - 1;
+      }
+      
       nav.setNavigationButtons(canGoBack, canGoForward);
     } else {
       nav.setNavigationButtons(false, false);

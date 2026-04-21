@@ -68,12 +68,12 @@
   const uploadListBox = $('#uploadListBox');
   const protocolSelect = $('#protocolSelect');
   
-  // Enable drag-and-drop
-  uploadBox.ondragover = () => false;
+  // Enable drag-and-drop (files only; use file picker for directories)
+  uploadBox.ondragover = (e) => { e.preventDefault(); return false; };
   uploadBox.ondrop = async (e) => {
       e.preventDefault();
       const { dataTransfer } = e;
-      if (!dataTransfer) return;
+      if (!dataTransfer || !dataTransfer.files.length) return;
       await uploadFiles(dataTransfer.files);
   };
   
@@ -99,19 +99,30 @@
       const protocol = protocolSelect.value;
   
       if (protocol === 'hyper') {
-          const hyperdriveUrl = await generateHyperdriveKey('drag-and-drop');
+          let name = 'untitled'; // Default name if we can't determine one
+          if (files.length > 0) {
+              const file = files[0];
+              if (file.webkitRelativePath) {
+                  name = file.webkitRelativePath.split('/')[0] || file.name;
+              } else {
+                  name = file.name;
+              }
+          }
+          const hyperdriveUrl = await generateHyperdriveKey(name);
           console.log(`Hyper base URL: ${hyperdriveUrl}`);
   
           for (const file of files) {
-              const url = `${hyperdriveUrl}${encodeURIComponent(file.name)}`;
-              console.log(`Uploading ${file.name} to ${url}`);
+              const filePath = file.webkitRelativePath || file.name;
+              const url = hyperdriveUrl + filePath.split('/').map(encodeURIComponent).join('/');
+              console.log(`Uploading ${filePath} to ${url}`);
   
               try {
+                  const buffer = await file.arrayBuffer();
                   const response = await fetch(url, {
                       method: 'PUT',
-                      body: file,
+                      body: new Uint8Array(buffer),
                       headers: {
-                          'Content-Type': file.type || 'application/octet-stream'
+                          'Content-Type': 'application/octet-stream'
                       }
                   });
   
@@ -132,8 +143,10 @@
       } else {
           const formData = new FormData();
           for (const file of files) {
-              console.log(`Appending file for IPFS: ${file.name}`);
-              formData.append('file', file, file.name);
+              // Use webkitRelativePath to preserve folder structure for directory uploads
+              const filePath = file.webkitRelativePath || file.name;
+              console.log(`Appending file for IPFS: ${filePath}`);
+              formData.append('file', file, filePath);
           }
           const url = `ipfs://bafyaabakaieac/`;
           console.log(`Sending to IPFS: ${url}`);

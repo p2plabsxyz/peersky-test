@@ -17,12 +17,19 @@ class TabBar extends HTMLElement {
       'var(--peersky-nav-button-hover)',
       'var(--peersky-nav-button-inactive)',
     ];
+    this.memorySaverEnabled = false;
+    this.memorySaverExclusions = [];
     this.draggedTabId = null;
     const params = new URLSearchParams(window.location.search);
     this.windowId = params.get('windowId') || 'main';
     this.buildTabBar();
     this.setupBrowserCloseHandler();
     this.setupTabContextMenu();
+    this.splitPairs = [];
+    this.pendingSplit = {
+      isActive: false,
+      leftTabId: null
+    };
   }
 
   // Connect to the webview container where all webviews will live
@@ -33,6 +40,215 @@ class TabBar extends HTMLElement {
     
     // Force activation of the initial tab's webview after a delay
     setTimeout(() => this.forceActivateCurrentTab(), 300);
+
+    // Initialize memory saver
+    this.initMemorySaver();
+  }
+
+  disconnectedCallback() {
+    // Cleanup Memory Saver listeners and intervals
+    if (this._memorySaverInterval) {
+      clearInterval(this._memorySaverInterval);
+      this._memorySaverInterval = null;
+    }
+    if (this._memorySaverListener) {
+      const { ipcRenderer } = require('electron');
+      ipcRenderer.removeListener('memory-saver-changed', this._memorySaverListener);
+      this._memorySaverListener = null;
+    }
+  }
+
+  async initMemorySaver() {
+    try {
+      const { ipcRenderer } = require('electron');
+      
+      // Load initial settings
+      this.memorySaverEnabled = await ipcRenderer.invoke('settings-get', 'memorySaverEnabled');
+      this.memorySaverExclusions = await ipcRenderer.invoke('settings-get', 'memorySaverExclusions');
+      
+      // Listen for changes
+      this._memorySaverListener = (_, data) => {
+        this.memorySaverEnabled = data.enabled;
+        this.memorySaverExclusions = data.exclusions || [];
+      };
+      ipcRenderer.on('memory-saver-changed', this._memorySaverListener);
+      
+      // Start background check loop (every 1 minute)
+      this._memorySaverInterval = setInterval(() => this.checkMemorySaver(), 60000);
+    } catch (error) {
+      console.warn('Failed to initialize memory saver in TabBar:', error);
+    }
+  }
+
+  isUrlExcluded(url) {
+    if (!url || !this.memorySaverExclusions || !this.memorySaverExclusions.length) return false;
+    try {
+      const parsedUrl = new URL(url);
+      
+      for (const pattern of this.memorySaverExclusions) {
+        if (!pattern) continue;
+        
+        if (pattern.includes('*')) {
+          try {
+            const escapedPattern = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+            const regexPattern = escapedPattern.replace(/\*/g, '.*');
+            const regex = new RegExp(`^${regexPattern}$`, 'i');
+            if (regex.test(url) || regex.test(parsedUrl.host + parsedUrl.pathname) || regex.test(parsedUrl.hostname)) {
+              return true;
+            }
+          } catch (err) {
+            console.warn(`[Memory Saver] Invalid pattern: ${pattern}`, err);
+          }
+        } else {
+          if (parsedUrl.host === pattern || parsedUrl.host.endsWith('.' + pattern) || url.startsWith(pattern)) {
+            return true;
+          }
+        }
+      }
+    } catch (e) {
+      return this.memorySaverExclusions.some(pattern => url.includes(pattern.replace(/\*/g, '')));
+    }
+    return false;
+  }
+
+  checkMemorySaver() {
+    if (!this.memorySaverEnabled) return;
+
+    // 30 minutes in ms
+    const IDLE_THRESHOLD = 30 * 60 * 1000;
+    const now = Date.now();
+
+    for (const tab of this.tabs) {
+      // Skip active tab
+      if (tab.id === this.activeTabId) continue;
+      
+      // Skip correctly already suspended ones
+      if (tab.isSuspended) continue;
+      
+      // Skip pinned tabs 
+      if (this.pinnedTabs.has(tab.id)) continue;
+      
+      // Check idle time
+      const idleTime = now - (tab.lastActiveTime || now);
+      if (idleTime > IDLE_THRESHOLD) {
+        
+        // Check exclusion list
+        if (this.isUrlExcluded(tab.url)) continue;
+        
+        // Check if audible (playing audio/video media)
+        const webview = this.webviews.get(tab.id);
+        if (webview) {
+          try {
+            const { ipcRenderer } = require("electron");
+            const webContentsId = typeof webview.getWebContentsId === 'function'
+              ? webview.getWebContentsId()
+              : null;
+            if (webContentsId != null) {
+              const isAudible = ipcRenderer.sendSync('is-webcontents-audible', webContentsId);
+              if (isAudible) continue;
+            }
+          } catch (e) {
+            console.warn("Failed to determine audibility for tab", e);
+          }
+        }
+        
+        this.suspendTab(tab.id);
+      }
+    }
+  }
+
+  async suspendTab(tabId) {
+    const tab = this.tabs.find(t => t.id === tabId);
+    const webview = this.webviews.get(tabId);
+    if (!tab || !webview) return;
+
+    // Capture webContentsId once while the webview is still alive,
+    // so both the navigation save and the extension unregister can reuse it
+    // safely after webview.remove() is called.
+    let webContentsId = null;
+    try {
+      webContentsId = typeof webview.getWebContentsId === "function"
+        ? webview.getWebContentsId()
+        : null;
+    } catch (e) {
+      console.warn("Failed to get webContentsId for sleeping tab", e);
+    }
+
+    // Save history only if not already tracked by fallback mechanism
+    if (!tab.savedNavigation || !tab.savedNavigation.entries?.length) {
+      if (webContentsId != null) {
+        try {
+          const { ipcRenderer } = require("electron");
+          tab.savedNavigation = ipcRenderer.sendSync("get-tab-navigation", webContentsId);
+        } catch (e) {
+          console.warn("Failed to save nav history for sleeping tab", e);
+        }
+      }
+    }
+
+    // Destroy webview
+    webview.remove();
+    this.webviews.delete(tabId);
+
+    // Unregister extension cleanly (reuse the already-captured id)
+    if (webContentsId != null) {
+      try {
+        const { ipcRenderer } = require("electron");
+        ipcRenderer.invoke('extensions-unregister-webview', webContentsId).catch(err => {
+          console.warn("Failed to unregister webview extensions for sleeping tab", err);
+        });
+      } catch (e) {
+        console.warn("Error while requesting webview extension unregister for sleeping tab", e);
+      }
+    }
+
+    // Mark as suspended
+    tab.isSuspended = true;
+
+    // Update UI (add sleeping styling)
+    const tabElement = document.getElementById(tabId);
+    if (tabElement) {
+      // Add sleeping UI state
+      tabElement.classList.add('sleeping');
+    }
+
+    console.log(`Memory Saver: Suspended inactive tab ${tabId} (${tab.url})`);
+  }
+
+  restoreNavigationForWebview(tabId, webview, navigation, reason = "tab") {
+    if (!webview || !navigation?.entries?.length) return;
+
+    const { entries, activeIndex } = navigation;
+    const { ipcRenderer } = require("electron");
+    let restored = false;
+
+    const attemptRestore = async () => {
+      if (restored || !document.body.contains(webview)) return;
+
+      try {
+        const webContentsId = webview.getWebContentsId();
+        if (webContentsId == null) return;
+
+        restored = true;
+        await ipcRenderer.invoke("restore-navigation-history", {
+          webContentsId,
+          entries,
+          activeIndex
+        });
+
+        this.dispatchEvent(new CustomEvent("navigation-state-changed", {
+          detail: { tabId }
+        }));
+        this.saveTabsState();
+      } catch (e) {
+        console.warn(`Failed to restore ${reason} nav history:`, e);
+      }
+    };
+
+    webview.addEventListener("dom-ready", attemptRestore, { once: true });
+    setTimeout(() => {
+      attemptRestore();
+    }, 300);
   }
 
   forceActivateCurrentTab() {
@@ -118,10 +334,7 @@ class TabBar extends HTMLElement {
       }
     });
     
-    // Add drag and drop listeners
-    this.tabContainer.addEventListener('dragstart', this.handleDragStart.bind(this));
-    this.tabContainer.addEventListener('dragend', this.handleDragEnd.bind(this));
-    this.tabContainer.addEventListener('dragover', this.handleDragOver.bind(this));
+    this.tabContainer.addEventListener('pointerdown', this.handlePointerDown.bind(this));
     
     // Don't add first tab automatically here anymore
     // Will be handled in restoreOrCreateInitialTabs
@@ -136,6 +349,35 @@ class TabBar extends HTMLElement {
     const singleTabUrl = searchParams.get('singleTabUrl');
     const singleTabTitle = searchParams.get('singleTabTitle');
     
+    const splitLeftUrl = searchParams.get('splitLeftUrl');
+    const splitRightUrl = searchParams.get('splitRightUrl');
+
+    if (isIsolated && splitLeftUrl && splitRightUrl) {
+      const leftTitle = searchParams.get('splitLeftTitle') || "New Tab";
+      const rightTitle = searchParams.get('splitRightTitle') || "New Tab";
+      const ratio = parseInt(searchParams.get('splitRatio') || '50', 10);
+
+      const leftTabId = this.addTab(splitLeftUrl, leftTitle);
+      const rightTabId = this.addTab(splitRightUrl, rightTitle);
+
+      this.splitPairs.push({ leftTabId: leftTabId, rightTabId: rightTabId, splitRatio: ratio });
+      
+      const leftTab = document.getElementById(leftTabId);
+      const rightTab = document.getElementById(rightTabId);
+      
+      if (leftTab && rightTab && leftTab.parentNode) {
+        leftTab.classList.add('split-left');
+        rightTab.classList.add('split-right');
+        
+        if (leftTab.nextSibling !== rightTab) {
+          leftTab.parentNode.insertBefore(rightTab, leftTab.nextSibling);
+        }
+      }
+      
+      this.selectTab(rightTabId);
+      return;
+    }
+
     if (isIsolated && (singleTabUrl || initialUrl)) {
       // For isolated windows, ONLY create the specified tab and don't load any persisted tabs
       const tabUrl = singleTabUrl || initialUrl;
@@ -210,16 +452,18 @@ getAllTabGroups() {
       const tabsData = {
         tabs: this.tabs.map(tab => {
           const webview = this.webviews.get(tab.id);
-          let navigation = null;
+          let navigation = tab.savedNavigation?.entries?.length ? tab.savedNavigation : null;
 
-          try {
-            if (webview && webview.getWebContentsId) {
-              const { ipcRenderer } = require("electron");
-              // Ask main process for nav history of this tab
-              navigation = ipcRenderer.sendSync('get-tab-navigation', webview.getWebContentsId());
+          if (!navigation) {
+            try {
+              if (webview && webview.getWebContentsId) {
+                const { ipcRenderer } = require("electron");
+                // Ask main process for nav history of this tab
+                navigation = ipcRenderer.sendSync('get-tab-navigation', webview.getWebContentsId());
+              }
+            } catch (e) {
+              console.warn("Failed to fetch nav history for tab", tab.id, e);
             }
-          } catch (e) {
-            console.warn("Failed to fetch nav history for tab", tab.id, e);
           }
 
           return {
@@ -229,11 +473,13 @@ getAllTabGroups() {
             protocol: tab.protocol,
             isPinned: this.pinnedTabs.has(tab.id),
             groupId: this.tabGroupAssignments.get(tab.id) || null,
-            navigation 
+            navigation,
+            isSuspended: tab.isSuspended === true
           };
         }),
         activeTabId: this.activeTabId,
         tabCounter: this.tabCounter,
+        splitPairs: this.splitPairs,
         tabGroups: Array.from(this.tabGroups.entries()).map(([id, group]) => ({
           id,
           name: group.name,
@@ -298,22 +544,11 @@ restoreTabs(persistedData) {
 
   // Restore each tab
   persistedData.tabs.forEach(tabData => {
-    const tabId = this.addTabWithId(tabData.id, tabData.url, tabData.title);
+    const tabId = this.addTabWithId(tabData.id, tabData.url, tabData.title, tabData);
 
     if (tabData.navigation && tabData.navigation.entries?.length) {
-      const { entries, activeIndex } = tabData.navigation;
-      const { ipcRenderer } = require("electron");
       const webview = this.webviews.get(tabId);
-
-      setTimeout(() => {
-        try {
-          const webContentsId = webview.getWebContentsId();
-          ipcRenderer.invoke("restore-navigation-history", { webContentsId, entries, activeIndex })
-            .catch(err => console.warn("Failed to restore nav history:", err));
-        } catch (e) {
-          console.warn("Error sending restore-navigation-history:", e);
-        }
-      }, 150);
+      this.restoreNavigationForWebview(tabId, webview, tabData.navigation, "restored tab");
     }
 
     
@@ -343,6 +578,26 @@ restoreTabs(persistedData) {
       }
     }
   });
+
+  if (persistedData.splitPairs && persistedData.splitPairs.length > 0) {
+    this.splitPairs = persistedData.splitPairs;
+    
+    setTimeout(() => {
+      this.splitPairs.forEach(split => {
+        const leftTab = document.getElementById(split.leftTabId);
+        const rightTab = document.getElementById(split.rightTabId);
+
+        if (leftTab && rightTab) {
+          leftTab.classList.add('split-left');
+          rightTab.classList.add('split-right');
+          
+          if (leftTab.nextSibling !== rightTab) {
+            leftTab.parentNode.insertBefore(rightTab, leftTab.nextSibling);
+          }
+        }
+      });
+    }, 0);
+  }
 
   // Render all group headers
   for (const groupId of this.tabGroups.keys()) {
@@ -377,7 +632,7 @@ restoreTabs(persistedData) {
   // Add tab with specific ID (for restoration)
   addTabWithId(tabId, url = "peersky://home", title = "Home", tabData = {}) {    // Create tab UI
     const tab = document.createElement("div");
-    tab.className = "tab";
+    tab.className = "tab opening";
     tab.id = tabId;
     tab.dataset.url = url;
     tab.draggable = true;
@@ -405,27 +660,51 @@ restoreTabs(persistedData) {
     tab.appendChild(closeButton);
     
     tab.addEventListener("click", () => this.selectTab(tabId));
+
+    tab.addEventListener("mousemove", (e) => {
+      const rect = tab.getBoundingClientRect();
+      tab.style.setProperty('--mouse-x', `${e.clientX - rect.left}px`);
+      tab.style.setProperty('--mouse-y', `${e.clientY - rect.top}px`);
+    });
     
     this.setupTabHoverCard(tab, tabId);
     
-    this.tabContainer.appendChild(tab);
+    const addButton = this.tabContainer.querySelector('#add-tab');
+    if (addButton) {
+      this.tabContainer.insertBefore(tab, addButton);
+    } else {
+      this.tabContainer.appendChild(tab);
+    }
+    const index = this.tabs.length;
+    tab.style.transitionDelay = `${index * 15}ms`;
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        tab.classList.remove('opening');
+      });
+    });
     const protocol = this._getProtocol(url);
-    this.tabs.push({id: tabId, url, title, protocol});
+    this.tabs.push({
+      id: tabId, 
+      url, 
+      title, 
+      protocol,
+      lastActiveTime: Date.now(),
+      isSuspended: tabData.isSuspended === true,
+      savedNavigation: tabData.navigation || null
+    });
     
-    // Create webview for this tab if container exists
-    if (this.webviewContainer) {
+    // Create webview for this tab if container exists and NOT suspended
+    if (this.webviewContainer && !tabData.isSuspended) {
       const webview = this.createWebviewForTab(tabId, url);
 
       if (tabData.navigation && tabData.navigation.entries?.length) {
-        const { entries, activeIndex } = tabData.navigation;
-        try {
-          const { ipcRenderer } = require("electron");
-          const webContentsId = webview.getWebContentsId();
-          ipcRenderer.invoke('restore-navigation-history', { webContentsId, entries, activeIndex })
-            .catch(err => console.warn("Failed to restore nav history:", err));
-        } catch (e) {
-          console.warn("Error sending restore-navigation-history:", e);
-        }
+        this.restoreNavigationForWebview(tabId, webview, tabData.navigation, "new tab");
+      }
+    } else if (tabData.isSuspended) {
+      // Setup the suspended styling correctly so UI reflects memory saver
+      const tabElement = document.getElementById(tabId);
+      if (tabElement) {
+        tabElement.classList.add('sleeping');
       }
     }
     
@@ -461,27 +740,6 @@ restoreTabs(persistedData) {
         
         // Get webview to check memory usage (if available)
         const webview = this.webviews.get(tabId);
-        let memoryInfo = 'Memory usage: Loading...';
-        
-        // Try to get memory usage (this is an approximation)
-        if (webview) {
-          try {
-            const processId = webview.getWebContentsId();
-            const { ipcRenderer } = require('electron');
-            const memoryUsage = await ipcRenderer.invoke('get-tab-memory-usage', processId);
-            
-            if (memoryUsage && memoryUsage.workingSetSize) {
-              // Convert bytes to MB
-              const memoryMB = Math.round(memoryUsage.workingSetSize / 1024 / 1024);
-              memoryInfo = `Memory usage: ${memoryMB} MB`;
-            } else {
-              memoryInfo = 'Memory usage: N/A';
-            }
-          } catch (e) {
-            console.error("Failed to get memory usage:", e);
-            memoryInfo = 'Memory usage: N/A';
-          }
-        }
         
         // Helper function to escape HTML
         function escapeHtml(text) {
@@ -494,7 +752,7 @@ restoreTabs(persistedData) {
           <div class="hover-card-title">${escapeHtml(tab.title)}</div>
           <div class="hover-card-url">${escapeHtml(tab.url)}</div>
           <div class="hover-card-separator"></div>
-          <div class="hover-card-memory">${escapeHtml(memoryInfo)}</div>
+          <div class="hover-card-memory" id="hover-memory-${tabId}">Memory usage: Loading...</div>
         `;
         
         // Position the card
@@ -513,7 +771,36 @@ restoreTabs(persistedData) {
         if (cardRect.bottom > window.innerHeight) {
           hoverCard.style.top = `${tabRect.top - cardRect.height - 8}px`;
         }
+        
+        // Async memory lookup
+        if (webview) {
+          try {
+            const processId = webview.getWebContentsId();
+            const { ipcRenderer } = require('electron');
+            ipcRenderer.invoke('get-tab-memory-usage', processId).then(memoryUsage => {
+              const memDiv = document.getElementById(`hover-memory-${tabId}`);
+              if (!memDiv) return;
+              if (memoryUsage && memoryUsage.workingSetSize) {
+                const memoryMB = Math.round(memoryUsage.workingSetSize / 1024 / 1024);
+                memDiv.textContent = `Memory usage: ${memoryMB} MB`;
+              } else {
+                memDiv.textContent = 'Memory usage: N/A';
+              }
+            }).catch(() => {
+              const memDiv = document.getElementById(`hover-memory-${tabId}`);
+              if (memDiv) memDiv.textContent = 'Memory usage: N/A';
+            });
+          } catch (e) {
+            const memDiv = document.getElementById(`hover-memory-${tabId}`);
+            if (memDiv) memDiv.textContent = 'Memory usage: N/A';
+          }
+        } else {
+          // Tab is sleeping — no webview
+          const memDiv = document.getElementById(`hover-memory-${tabId}`);
+          if (memDiv) memDiv.textContent = tab.isSuspended ? 'Tab is sleeping' : 'Memory usage: N/A';
+        }
       }, 800); // Show after 800ms hover
+
     };
     
     const hideHoverCard = () => {
@@ -548,6 +835,9 @@ restoreTabs(persistedData) {
     setTimeout(() => {
       const urlInput = document.getElementById('url');
       if (urlInput) {
+        if (url === "peersky://home") {
+          urlInput.value = "";
+        }
         urlInput.focus();
         urlInput.select();
       }
@@ -583,7 +873,14 @@ restoreTabs(persistedData) {
     // Add to container first, then set up events
     this.webviewContainer.appendChild(webview);
     
-    // Add a load event to ensure webview is properly initialized
+    // Track the currently-registered webContents ID so we can detect
+    // guest-process replacements (Electron may create a new guest webContents
+    // after a crash, site-isolation swap, or certain CDP commands like
+    // Page.reload).  Re-register when the ID changes so the extension system
+    // (and chrome.debugger) can still reach the tab.
+    let registeredWcId = null;
+    let pendingWcId = null;
+    let registering = false;
     webview.addEventListener('dom-ready', () => {
       // Ensure this webview is visible if it's the active tab
       if (this.activeTabId === tabId) {
@@ -591,21 +888,38 @@ restoreTabs(persistedData) {
         webview.focus();
       }
       
-      // Register webview with extension system for proper tab context
-      // Use a small delay to ensure webview is fully attached
+      let currentWcId;
+      try { currentWcId = webview.getWebContentsId(); } catch (_) { return; }
+
+      // Same webContents — nothing to do (avoids the infinite reload loop
+      // that addTab() can cause when it triggers a navigation/dom-ready).
+      if (currentWcId === registeredWcId || registering) return;
+
+      registering = true;
+      pendingWcId = currentWcId;
+
       setTimeout(() => {
         try {
-          const webContentsId = webview.getWebContentsId();
+          const wcId = webview.getWebContentsId();
+          if (wcId !== pendingWcId) return; // changed again, skip
           const { ipcRenderer } = require('electron');
-          ipcRenderer.invoke('extensions-register-webview', webContentsId).then(result => {
+          ipcRenderer.invoke('extensions-register-webview', wcId).then(result => {
             if (!result.success) {
-              console.warn(`[TabBar] Failed to register webview ${webContentsId}:`, result.error);
+              console.warn(`[TabBar] Failed to register webview ${wcId}:`, result.error);
+              return;
             }
+            if (wcId !== pendingWcId) return; // changed again while registering, skip
+            registeredWcId = wcId;
           }).catch(error => {
             console.error(`[TabBar] Error registering webview:`, error);
+          }).finally(() => {
+            // Keep the "in-flight" guard until the async registration settles.
+            // This avoids concurrent registrations and potential reload/registration loops.
+            registering = false;
           });
         } catch (error) {
           console.warn(`[TabBar] Could not register webview with extension system:`, error);
+          registering = false;
         }
       }, 100); // Small delay to ensure webview is fully ready
     });
@@ -622,6 +936,10 @@ restoreTabs(persistedData) {
   // Set up all event handlers for a webview
   setupWebviewEvents(webview, tabId) {
     webview.addEventListener("did-start-loading", () => {
+      // Update last active time on interaction/loading
+      const tab = this.tabs.find(t => t.id === tabId);
+      if (tab) tab.lastActiveTime = Date.now();
+      
       const tabElement = document.getElementById(tabId);
       if (tabElement) {
         tabElement.classList.add("loading");
@@ -666,11 +984,28 @@ restoreTabs(persistedData) {
     
     webview.addEventListener("page-title-updated", (e) => {
       const newTitle = e.title || "Untitled";
+      const tab = this.tabs.find(t => t.id === tabId);
+      if (tab && tab.savedNavigation && tab.savedNavigation.entries && tab.savedNavigation.entries[tab.savedNavigation.activeIndex]) {
+        tab.savedNavigation.entries[tab.savedNavigation.activeIndex].title = newTitle;
+      }
       this.updateTab(tabId, { title: newTitle });
     });
   
     webview.addEventListener("did-navigate", (e) => {
       const newUrl = e.url;
+      const tab = this.tabs.find(t => t.id === tabId);
+      if (tab && tab.savedNavigation && tab.savedNavigation.entries) {
+        if (tab.isFallbackNavigating) {
+          tab.isFallbackNavigating = false;
+        } else {
+          const expectedUrl = tab.savedNavigation.entries[tab.savedNavigation.activeIndex]?.url;
+          if (expectedUrl !== newUrl) {
+            tab.savedNavigation.entries = tab.savedNavigation.entries.slice(0, tab.savedNavigation.activeIndex + 1);
+            tab.savedNavigation.entries.push({ url: newUrl, title: newUrl });
+            tab.savedNavigation.activeIndex++;
+          }
+        }
+      }
       this.updateTab(tabId, { url: newUrl });
       
       this.dispatchEvent(new CustomEvent("tab-navigated", { 
@@ -695,6 +1030,19 @@ restoreTabs(persistedData) {
     // Handle in-page navigation 
     webview.addEventListener("did-navigate-in-page", (e) => {
       const newUrl = e.url;
+      const tab = this.tabs.find(t => t.id === tabId);
+      if (tab && tab.savedNavigation && tab.savedNavigation.entries) {
+        if (tab.isFallbackNavigating) {
+          tab.isFallbackNavigating = false;
+        } else {
+          const expectedUrl = tab.savedNavigation.entries[tab.savedNavigation.activeIndex]?.url;
+          if (expectedUrl !== newUrl) {
+            tab.savedNavigation.entries = tab.savedNavigation.entries.slice(0, tab.savedNavigation.activeIndex + 1);
+            tab.savedNavigation.entries.push({ url: newUrl, title: newUrl });
+            tab.savedNavigation.activeIndex++;
+          }
+        }
+      }
       this.updateTab(tabId, { url: newUrl });
       
       this.dispatchEvent(new CustomEvent("tab-navigated", { 
@@ -754,12 +1102,19 @@ restoreTabs(persistedData) {
         faviconElement.style.display = 'block';
       }
     });
+
+    webview.addEventListener("focus", () => {
+      if (this.activeTabId !== tabId) {
+        this.selectTab(tabId);
+      }
+    });
   }
 
   closeTab(tabId) {
     this.destroyHoverCard(); // remove lingering hover card
     const tabElement = document.getElementById(tabId);
     if (!tabElement) return;
+    this.breakSplitView(tabId);
 
     // Get index of tab to close
     const tabIndex = this.tabs.findIndex(tab => tab.id === tabId);
@@ -778,8 +1133,14 @@ restoreTabs(persistedData) {
     }
 
     // Remove tab from DOM and array
-    tabElement.remove();
+    tabElement.classList.add('closing');
     this.tabs.splice(tabIndex, 1);
+
+    setTimeout(() => {
+      if (tabElement.parentNode) {
+        tabElement.remove();
+      }
+    }, 220);
 
     // Remove associated webview
     const webview = this.webviews.get(tabId);
@@ -818,40 +1179,164 @@ restoreTabs(persistedData) {
     this.dispatchEvent(new CustomEvent("tab-closed", { detail: { tabId } }));
   }
 
+  getSplitForTab(tabId) {
+    return this.splitPairs.find(split => split.leftTabId === tabId || split.rightTabId === tabId);
+  }
+
+  initiateSplitView(tabId) {
+    // Prevent splitting a tab that is already in a split
+    if (this.getSplitForTab(tabId)) return;
+
+    this.pendingSplit = {
+      isActive: true,
+      leftTabId: tabId
+    };
+
+    const leftTab = document.getElementById(tabId);
+    if (leftTab) leftTab.classList.add('split-pending');
+
+    if (this.webviewContainer) {
+      this.webviewContainer.style.display = 'flex';
+      this.webviewContainer.style.flexDirection = 'row';
+    }
+
+    this.selectTab(tabId);
+  }
+
+  assignRightSplitTab(tabId) {
+    if (!this.pendingSplit.isActive) return;
+
+    const leftId = this.pendingSplit.leftTabId;
+    const rightId = tabId;
+
+    this.splitPairs.push({ leftTabId: leftId, rightTabId: rightId, splitRatio: 50 });
+    this.pendingSplit = { isActive: false, leftTabId: null };
+
+    const leftTab = document.getElementById(leftId);
+    const rightTab = document.getElementById(rightId);
+
+    if (leftTab && rightTab && leftTab.parentNode) {
+      leftTab.classList.remove('split-pending');
+      leftTab.classList.add('split-left');
+
+      rightTab.classList.add('split-right');
+
+      leftTab.parentNode.insertBefore(rightTab, leftTab.nextSibling);
+    }
+
+    this.selectTab(rightId); 
+  }
+
+  breakSplitView(tabId) {
+    const splitIndex = this.splitPairs.findIndex(s => s.leftTabId === tabId || s.rightTabId === tabId);
+
+    if (splitIndex !== -1) {
+      const split = this.splitPairs[splitIndex];
+      const leftTab = document.getElementById(split.leftTabId);
+      const rightTab = document.getElementById(split.rightTabId);
+
+      if (leftTab) leftTab.classList.remove('split-left');
+      if (rightTab) rightTab.classList.remove('split-right');
+
+      this.splitPairs.splice(splitIndex, 1);
+
+      const survivingTabId = split.leftTabId === tabId ? split.rightTabId : split.leftTabId;
+      this.selectTab(survivingTabId);
+      return;
+    }
+
+    if (this.pendingSplit.isActive && this.pendingSplit.leftTabId === tabId) {
+      const leftTab = document.getElementById(this.pendingSplit.leftTabId);
+      if (leftTab) leftTab.classList.remove('split-pending');
+
+      this.pendingSplit = { isActive: false, leftTabId: null };
+      this.renderWebviews();
+    }
+  }
+
   // Update the selectTab method to handle display properly
   selectTab(tabId, isNewTab = false) {
-    
-    // First, hide ALL webviews to ensure clean state
-    this.webviews.forEach((webview) => {
-      webview.style.display = "none";
-    });
-    
-    // Remove active class from current active tab
     if (this.activeTabId) {
       const currentActive = document.getElementById(this.activeTabId);
-      if (currentActive) {
-        currentActive.classList.remove("active");
-      }
+      if (currentActive) currentActive.classList.remove("active");
     }
-    
-    // Add active class to new active tab
+
     const newActive = document.getElementById(tabId);
     if (newActive) {
       newActive.classList.add("active");
       this.activeTabId = tabId;
       
-      // Close all extension popups when switching tabs
-      try {
-        const { ipcRenderer } = require('electron');
-        ipcRenderer.invoke('extensions-close-all-popups').catch(error => {
-          console.warn('[TabBar] Failed to close extension popups on tab switch:', error);
-        });
-      } catch (error) {
-        console.warn('[TabBar] Error closing extension popups:', error);
+      // Close extension popups only on user-initiated tab switches.
+      // If an extension creates/navigates a tab while its popup is open (eg ArchiveWeb.page "View Web Archives"),
+      // closing popups here causes the popup to disappear immediately.
+      if (!isNewTab) {
+        try {
+          const { ipcRenderer } = require('electron');
+          ipcRenderer.invoke('extensions-close-all-popups').catch(error => {
+            console.warn('[TabBar] Failed to close extension popups on tab switch:', error);
+          });
+        } catch (error) {
+          console.warn('[TabBar] Error closing extension popups:', error);
+        }
+      }
+
+      // Wake up suspended tabs before pinning/showing so the fresh webview is used.
+      const tab = this.tabs.find(t => t.id === tabId);
+      if (tab) {
+        if (tab.isSuspended) {
+          tab.isFallbackNavigating = true;
+          const wokenWebview = this.createWebviewForTab(tabId, tab.url);
+
+          if (tab.savedNavigation && tab.savedNavigation.entries?.length) {
+            this.restoreNavigationForWebview(tabId, wokenWebview, tab.savedNavigation, "sleeping tab");
+          }
+          
+          tab.isSuspended = false;
+          
+          if (newActive) {
+            newActive.classList.remove('sleeping');
+            newActive.style.opacity = '';
+            const sleepIndicator = newActive.querySelector('.sleeping-indicator');
+            if (sleepIndicator) sleepIndicator.remove();
+          }
+          console.log(`Memory Saver: Woke up tab ${tabId} (${tab.url})`);
+        }
+        
+        tab.lastActiveTime = Date.now();
       }
       
-      // Show ONLY the newly active webview
+      const now = Date.now();
+      for (const [id, webviewEl] of this.webviews.entries()) {
+        if (id !== tabId && webviewEl && webviewEl.style.display === "flex") {
+          const oldTab = this.tabs.find(t => t.id === id);
+          if (oldTab) {
+            oldTab.lastActiveTime = now;
+          }
+          break;
+        }
+      }
+
       const newWebview = this.webviews.get(tabId);
+
+      // Keep extension system in sync with tab switches so popup UIs
+      // can resolve the active tab reliably.
+      if (newWebview) {
+        try {
+          const wcId = newWebview.getWebContentsId?.();
+          if (wcId) {
+            const { ipcRenderer } = require('electron');
+            ipcRenderer.invoke('extensions-pin-active-webview', wcId).then((res) => {
+              if (res && res.success === false) {
+                console.warn('[TabBar] Failed to pin active webview for extensions:', res.error || res.code || res);
+              }
+            }).catch((e) => {
+              console.warn('[TabBar] Error pinning active webview for extensions:', e?.message || e);
+            });
+          }
+        } catch (_) {}
+      }
+
+      // Show ONLY the newly active webview
       if (newWebview) {
         newWebview.style.display = "flex";
         
@@ -867,17 +1352,187 @@ restoreTabs(persistedData) {
       }
       
       // Find the URL for this tab
-      const tab = this.tabs.find(t => t.id === tabId);
-      if (tab) {
+      const selectedTab = this.tabs.find(t => t.id === tabId);
+      if (selectedTab) {
         // Dispatch event that tab was selected with the URL
         this.dispatchEvent(new CustomEvent("tab-selected", { 
-          detail: { tabId, url: tab.url } 
+          detail: { tabId, url: selectedTab.url } 
         }));
       }
     }
-    
-    // Save state when tab is selected
+
+    this.renderWebviews();
+
+    if (!isNewTab) {
+      setTimeout(() => {
+        const activeWv = this.webviews.get(tabId);
+        if (activeWv && document.body.contains(activeWv)) activeWv.focus();
+      }, 10);
+    }
+
     this.saveTabsState();
+  }
+
+  renderWebviews() {
+    if (!this.webviewContainer) return;
+
+    let divider = document.getElementById('split-view-divider');
+    if (!divider) {
+      divider = document.createElement('div');
+      divider.id = 'split-view-divider';
+      divider.className = 'split-view-divider';
+      divider.addEventListener('pointerdown', this.handleDividerPointerDown.bind(this));
+      this.webviewContainer.appendChild(divider);
+    }
+
+    divider.style.display = 'none';
+    this.webviews.forEach((webview) => {
+      webview.style.display = "none";
+      webview.style.flex = "none";
+      webview.style.width = "100%";
+      webview.style.borderRight = "none";
+      webview.style.order = "";
+    });
+
+    const existingOverlay = document.getElementById('split-view-selector-overlay');
+    if (existingOverlay) existingOverlay.style.display = 'none';
+
+    const activeSplit = this.getSplitForTab(this.activeTabId);
+
+    if (activeSplit) {
+      const leftWv = this.webviews.get(activeSplit.leftTabId);
+      const rightWv = this.webviews.get(activeSplit.rightTabId);
+
+      if (leftWv && rightWv) {
+        leftWv.style.display = "flex";
+        leftWv.style.flex = `0 0 ${activeSplit.splitRatio || 50}%`;
+        leftWv.style.order = "1";
+        
+        divider.style.display = "block";
+        divider.style.order = "2";
+
+        rightWv.style.display = "flex";
+        rightWv.style.flex = `0 0 ${100 - (activeSplit.splitRatio || 50)}%`;
+        rightWv.style.order = "3";
+      }
+    } else if (this.pendingSplit.isActive && this.activeTabId === this.pendingSplit.leftTabId) {
+      const leftWv = this.webviews.get(this.pendingSplit.leftTabId);
+      if (leftWv) {
+        leftWv.style.display = "flex";
+        leftWv.style.flex = "0 0 50%";
+        leftWv.style.borderRight = "1px solid var(--settings-border)";
+      }
+      this.drawSplitSelectorOverlay();
+    } else {
+      const activeWv = this.webviews.get(this.activeTabId);
+      if (activeWv) {
+        activeWv.style.display = "flex";
+        activeWv.style.flex = "1";
+      }
+    }
+  }
+
+  drawSplitSelectorOverlay() {
+    let selector = document.getElementById('split-view-selector-overlay');
+
+    if (!selector) {
+      selector = document.createElement('div');
+      selector.id = 'split-view-selector-overlay';
+      this.webviewContainer.appendChild(selector);
+    }
+
+    selector.style.display = 'flex';
+    Object.assign(selector.style, {
+      flex: '0 0 50%',
+      backgroundColor: 'var(--browser-theme-background)',
+      display: 'flex',
+      flexDirection: 'column',
+      padding: '30px',
+      boxSizing: 'border-box',
+      overflowY: 'auto',
+      color: 'var(--browser-theme-text-color)'
+    });
+
+    selector.innerHTML = `
+      <h2 style="margin-top: 0; font-weight: normal; font-size: 1.5rem;">Select a tab to split</h2>
+      <p style="color: var(--settings-text-secondary); margin-bottom: 20px;">Choose a tab to open in the right panel.</p>
+    `;
+
+    const newTabBtn = document.createElement('button');
+    Object.assign(newTabBtn.style, {
+      padding: '12px 16px',
+      marginBottom: '16px',
+      backgroundColor: 'var(--browser-theme-primary-highlight)',
+      color: '#fff',
+      border: 'none',
+      borderRadius: '8px',
+      cursor: 'pointer',
+      fontSize: '14px',
+      fontWeight: 'bold',
+      textAlign: 'left',
+      display: 'flex',
+      alignItems: 'center',
+      gap: '8px'
+    });
+    newTabBtn.innerHTML = `<span style="font-size:18px;">+</span> Open New Tab`;
+    newTabBtn.onclick = () => {
+      const newTabId = this.addTab();
+      this.assignRightSplitTab(newTabId);
+    };
+    selector.appendChild(newTabBtn);
+
+    const tabsList = document.createElement('div');
+    tabsList.style.display = 'flex';
+    tabsList.style.flexDirection = 'column';
+    tabsList.style.gap = '8px';
+
+    this.tabs.forEach(tab => {
+      // Don't show tabs that are already in ANY split view, or the currently pending tab
+      if (tab.id !== this.pendingSplit.leftTabId && !this.getSplitForTab(tab.id)) {
+        const tabBtn = document.createElement('button');
+        Object.assign(tabBtn.style, {
+          padding: '12px 16px',
+          backgroundColor: 'var(--settings-card-bg)',
+          color: 'var(--browser-theme-text-color)',
+          border: '1px solid var(--settings-border)',
+          borderRadius: '8px',
+          cursor: 'pointer',
+          textAlign: 'left',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '12px',
+          fontSize: '14px'
+        });
+
+        let currentIconUrl = 'peersky://static/assets/svg/globe.svg';
+
+        const liveTabElement = document.getElementById(tab.id);
+        if (liveTabElement) {
+          const faviconDiv = liveTabElement.querySelector('.tab-favicon');
+          if (faviconDiv && faviconDiv.style.backgroundImage && faviconDiv.style.backgroundImage !== 'none') {
+            const match = faviconDiv.style.backgroundImage.match(/^url\(['"]?([^'"]+)['"]?\)/);
+            if (match && match[1]) {
+              currentIconUrl = match[1];
+            }
+          }
+        }
+
+        const iconImg = document.createElement('img');
+        iconImg.src = currentIconUrl;
+        iconImg.style.width = '16px';
+        iconImg.style.height = '16px';
+
+        const titleText = document.createTextNode(` ${tab.title}`);
+
+        tabBtn.appendChild(iconImg);
+        tabBtn.appendChild(titleText);
+
+        tabBtn.onclick = () => this.assignRightSplitTab(tab.id);
+        tabsList.appendChild(tabBtn);
+      }
+    });
+
+    selector.appendChild(tabsList);
   }
 
   updateTab(tabId, { url, title }) {
@@ -887,11 +1542,6 @@ restoreTabs(persistedData) {
     if (url) {
       tab.url = url;
       tab.protocol = this._getProtocol(url);
-      // Update the webview if URL is updated externally
-      const webview = this.webviews.get(tabId);
-      if (webview && webview.getAttribute("src") !== url) {
-        webview.setAttribute("src", url);
-      }
     }
     
     if (title) {
@@ -937,14 +1587,32 @@ restoreTabs(persistedData) {
   
   goBackActiveTab() {
     const webview = this.getActiveWebview();
-    if (webview && webview.canGoBack()) {
+    const tab = this.getActiveTab();
+
+    if (tab && tab.savedNavigation && tab.savedNavigation.entries && tab.savedNavigation.entries.length > 0) {
+      if (tab.savedNavigation.activeIndex > 0) {
+        tab.savedNavigation.activeIndex--;
+        const previousUrl = tab.savedNavigation.entries[tab.savedNavigation.activeIndex].url;
+        tab.isFallbackNavigating = true;
+        this.navigateActiveTab(previousUrl);
+      }
+    } else if (webview && webview.canGoBack()) {
       webview.goBack();
     }
   }
   
   goForwardActiveTab() {
     const webview = this.getActiveWebview();
-    if (webview && webview.canGoForward()) {
+    const tab = this.getActiveTab();
+
+    if (tab && tab.savedNavigation && tab.savedNavigation.entries && tab.savedNavigation.entries.length > 0) {
+      if (tab.savedNavigation.activeIndex < tab.savedNavigation.entries.length - 1) {
+        tab.savedNavigation.activeIndex++;
+        const nextUrl = tab.savedNavigation.entries[tab.savedNavigation.activeIndex].url;
+        tab.isFallbackNavigating = true;
+        this.navigateActiveTab(nextUrl);
+      }
+    } else if (webview && webview.canGoForward()) {
       webview.goForward();
     }
   }
@@ -1009,6 +1677,7 @@ restoreTabs(persistedData) {
     const webview = this.webviews.get(tabId);
     const isPinned = this.pinnedTabs.has(tabId);
     const isMuted = webview?.isAudioMuted() || false;
+    const isSplit = this.getSplitForTab(tabId) || (this.pendingSplit.isActive && this.pendingSplit.leftTabId === tabId);
 
     const iconPath = 'peersky://static/assets/svg';
 
@@ -1021,6 +1690,17 @@ restoreTabs(persistedData) {
         <img class="menu-icon" src="${iconPath}/copy.svg" />
         Duplicate tab
       </div>
+      ${isSplit ? `
+        <div class="context-menu-item" data-action="separate-split">
+          <img class="menu-icon" src="${iconPath}/layout-split.svg" />
+          Separate split view
+        </div>
+        ` : `
+        <div class="context-menu-item" data-action="split-view">
+          <img class="menu-icon" src="${iconPath}/layout-split.svg" />
+          Split view
+        </div>
+      `}
       <div class="context-menu-item" data-action="mute">
         <img class="menu-icon" src="${iconPath}/${isMuted ? 'volume-up.svg' : 'volume-mute.svg'}" />
         ${isMuted ? 'Unmute site' : 'Mute site'}
@@ -1134,6 +1814,14 @@ restoreTabs(persistedData) {
         this.duplicateTab(tabId);
         break;
         
+      case 'split-view':
+        this.initiateSplitView(tabId);
+        break;
+
+      case 'separate-split':
+        this.breakSplitView(tabId);
+        break;
+
       case 'mute':
         if (webview) {
           if (webview.isAudioMuted()) {
@@ -1225,6 +1913,56 @@ restoreTabs(persistedData) {
     return newTabId;
   }
 
+  moveSplitGroupToNewWindow(tabIds) {
+    const [leftId, rightId] = tabIds;
+    
+    const leftTab = this.tabs.find(t => t.id === leftId);
+    const rightTab = this.tabs.find(t => t.id === rightId);
+    const splitPair = this.splitPairs.find(s => s.leftTabId === leftId && s.rightTabId === rightId);
+    const splitRatio = splitPair ? splitPair.splitRatio : 50;
+
+    if (!leftTab || !rightTab) return;
+
+    tabIds.forEach(tabId => {
+      this.destroyHoverCard();
+      const tabElement = document.getElementById(tabId);
+      if (tabElement) tabElement.remove();
+
+      const tabIndex = this.tabs.findIndex(t => t.id === tabId);
+      if (tabIndex !== -1) this.tabs.splice(tabIndex, 1);
+
+      const webview = this.webviews.get(tabId);
+      if (webview) {
+        webview.remove();
+        this.webviews.delete(tabId);
+      }
+
+      this.pinnedTabs.delete(tabId);
+      this.removeTabFromGroup(tabId);
+    });
+
+    const splitIndex = this.splitPairs.findIndex(s => s.leftTabId === leftId && s.rightTabId === rightId);
+    if (splitIndex !== -1) this.splitPairs.splice(splitIndex, 1);
+
+    if (tabIds.includes(this.activeTabId)) {
+      if (this.tabs.length > 0) {
+        this.selectTab(this.tabs[this.tabs.length - 1].id);
+      }
+    }
+
+    this.saveTabsState();
+
+    const { ipcRenderer } = require('electron');
+    ipcRenderer.send('new-window-with-split-tabs', {
+      leftUrl: leftTab.url,
+      leftTitle: leftTab.title,
+      rightUrl: rightTab.url,
+      rightTitle: rightTab.title,
+      splitRatio: splitRatio,
+      isolate: true 
+    });
+  }
+
   moveTabToNewWindow(tabId) {
     this.destroyHoverCard(); // ensure card removed if this tab had it
     const tab = this.tabs.find(t => t.id === tabId);
@@ -1286,20 +2024,33 @@ restoreTabs(persistedData) {
 
   // Toggle pin state of a tab
   togglePinTab(tabId) {
-    const tabElement = document.getElementById(tabId);
-    if (!tabElement) return;
+    const split = this.getSplitForTab(tabId);
 
-    if (this.pinnedTabs.has(tabId)) {
-      // Unpin tab
-      this.pinnedTabs.delete(tabId);
-      tabElement.classList.remove('pinned');
+    const tabsToProcess = split ? [split.leftTabId, split.rightTabId] : [tabId];
+
+    const isCurrentlyPinned = this.pinnedTabs.has(tabId);
+
+    if (isCurrentlyPinned) {
+      tabsToProcess.forEach(id => {
+        this.pinnedTabs.delete(id);
+        const el = document.getElementById(id);
+        if (el) el.classList.remove('pinned');
+      });
     } else {
-      // Pin tab
-      this.pinnedTabs.add(tabId);
-      tabElement.classList.add('pinned');
-      
-      // Move to leftmost position
-      this.moveTabToPosition(tabId, 0);
+      tabsToProcess.forEach(id => {
+        this.pinnedTabs.add(id);
+        const el = document.getElementById(id);
+        if (el) el.classList.add('pinned');
+      });
+
+      // Move to leftmost position while preserving split order
+      if (split) {
+        this.moveTabToPosition(split.leftTabId, 0);
+        this.moveTabToPosition(split.rightTabId, 1);
+      } else {
+        // Normal single tab move
+        this.moveTabToPosition(tabId, 0);
+      }
     }
     
     this.saveTabsState();
@@ -1320,17 +2071,22 @@ restoreTabs(persistedData) {
     // Insert at new position in array
     this.tabs.splice(position, 0, tab);
     
-    // Update DOM order
+    // Update DOM order safely
     const tabElement = document.getElementById(tabId);
     if (tabElement && this.tabContainer) {
       this.tabContainer.removeChild(tabElement);
+      const addButton = this.tabContainer.querySelector('#add-tab');
       
       if (position === 0) {
         // Insert at beginning
         this.tabContainer.insertBefore(tabElement, this.tabContainer.firstChild);
       } else if (position >= this.tabs.length - 1) {
         // Insert at end
-        this.tabContainer.appendChild(tabElement);
+        if (addButton) {
+          this.tabContainer.insertBefore(tabElement, addButton);
+        } else {
+          this.tabContainer.appendChild(tabElement);
+        }
       } else {
         // Insert at specific position
         const nextTabId = this.tabs[position + 1].id;
@@ -1338,7 +2094,12 @@ restoreTabs(persistedData) {
         if (nextTabElement) {
           this.tabContainer.insertBefore(tabElement, nextTabElement);
         } else {
-          this.tabContainer.appendChild(tabElement);
+          // Fallback to inserting before add button
+          if (addButton) {
+            this.tabContainer.insertBefore(tabElement, addButton);
+          } else {
+            this.tabContainer.appendChild(tabElement);
+          }
         }
       }
     }
@@ -2232,76 +2993,403 @@ restoreTabs(persistedData) {
     this.saveTabsState();
   }
 
-  // Drag and Drop Handlers
-  handleDragStart(e) {
-    const tabElement = e.target.closest('.tab');
-    if (tabElement) {
-      this.draggedTabId = tabElement.id;
-      // Add a delay to allow the browser to create the drag image
-      setTimeout(() => {
-        tabElement.classList.add('dragging');
-      }, 0);
-    }
-  }
+  animateTabReorder() {
+    const isVert = this.isVertical;
+    const elements = [...this.tabContainer.querySelectorAll('.tab:not(.dragging), #add-tab')];
 
-  handleDragEnd() {
-    if (!this.draggedTabId) return;
-
-    const tabElement = document.getElementById(this.draggedTabId);
-    if (tabElement) {
-      tabElement.classList.remove('dragging');
-    }
-
-    // Get the new order of tab IDs from the DOM
-    const newTabElements = Array.from(this.tabContainer.querySelectorAll('.tab'));
-    const newTabOrderIds = newTabElements.map(el => el.id);
-
-    // Reorder the internal `this.tabs` array to match the DOM
-    this.tabs.sort((a, b) => {
-      return newTabOrderIds.indexOf(a.id) - newTabOrderIds.indexOf(b.id);
+    const firstRects = new Map();
+    
+    elements.forEach(el => {
+      firstRects.set(el, el.getBoundingClientRect());
+      el.style.transition = 'none';
     });
 
-    // Save the new state and refresh group UI to ensure headers are correct
-    this.saveTabsState();
-    this.refreshGroupStyles();
+    requestAnimationFrame(() => {
+      elements.forEach(el => {
+        const last = el.getBoundingClientRect();
+        const first = firstRects.get(el);
+        if (!first) return;
 
-    this.draggedTabId = null;
+        const dx = first.left - last.left;
+        const dy = first.top - last.top;
+
+        if (isVert && dy !== 0) {
+          el.style.transform = `translateY(${dy}px)`;
+          requestAnimationFrame(() => {
+            el.style.transition = 'transform 0.15s cubic-bezier(0.25, 0.8, 0.25, 1)';
+            el.style.transform = '';
+          });
+          el.addEventListener('transitionend', () => { el.style.transition = ''; }, { once: true });
+        } else if (!isVert && dx !== 0) {
+          el.style.transform = `translateX(${dx}px)`;
+
+          requestAnimationFrame(() => {
+            el.style.transition = 'transform 0.15s cubic-bezier(0.25, 0.8, 0.25, 1)';
+            el.style.transform = '';
+          });
+          el.addEventListener('transitionend', () => { el.style.transition = ''; }, { once: true });
+        } else {
+          el.style.transition = ''; 
+        }
+      });
+    });
   }
 
-  handleDragOver(e) {
-    e.preventDefault();
-    
-    const draggingElement = document.getElementById(this.draggedTabId);
-    if (!draggingElement) return;
+  get isVertical() {
+    return document.body.classList.contains('vertical-tabs-layout') || getComputedStyle(this.tabContainer).flexDirection === 'column';
+  }
 
-    // Find the tab we are hovering over to insert before it
-    const afterElement = this.getDragAfterElement(this.tabContainer, e.clientX);
+  // Drag and Drop Handlers
+  handlePointerDown(e) {
+    // Only accept left-clicks. Ignore clicks on close buttons or the add tab button.
+    if (e.button !== 0 || e.target.closest('.close-tab') || e.target.closest('.add-tab-button')) return;
 
-    if (afterElement) {
-      this.tabContainer.insertBefore(draggingElement, afterElement);
+    const tab = e.target.closest('.tab');
+    if (!tab) return;
+
+    const split = this.getSplitForTab(tab.id);
+    if (split) {
+      const leftTab = document.getElementById(split.leftTabId);
+      const rightTab = document.getElementById(split.rightTabId);
+      this.draggedElements = [leftTab, rightTab].filter(Boolean);
     } else {
-      // We are at the end, so append it
-      this.tabContainer.appendChild(draggingElement);
+      this.draggedElements = [tab];
+    }
+
+    this.primaryDragTarget = tab;
+    
+    this.dragStartX = e.clientX;
+    this.dragStartY = e.clientY;
+    this.isDragging = false;
+    this.isOutsideContainer = false;
+
+    this.onPointerMove = this.handlePointerMove.bind(this);
+    this.onPointerUp = this.handlePointerUp.bind(this);
+
+    window.addEventListener('pointermove', this.onPointerMove);
+    window.addEventListener('pointerup', this.onPointerUp);
+    window.addEventListener('pointercancel', this.onPointerUp); // Catch system interruptions
+  }
+
+  handlePointerMove(e) {
+    if (!this.draggedElements || this.draggedElements.length === 0) return;
+
+    const isVert = this.isVertical;
+    const dx = e.clientX - this.dragStartX;
+    const dy = e.clientY - this.dragStartY;
+
+    if (!this.isDragging && Math.hypot(dx, dy) > 3) {
+      this.isDragging = true;
+      this.destroyHoverCard();
+
+      // Collect bounding rects
+      const rects = this.draggedElements.map(el => el.getBoundingClientRect());
+
+      // Calculate total width and height dynamically based on layout mode
+      let totalWidth = 0;
+      let totalHeight = 0;
+
+      if (isVert) {
+        // Vertical mode: stack heights, use max width
+        totalWidth = Math.max(...rects.map(r => r.width));
+        totalHeight = rects.reduce((sum, r) => sum + r.height, 0);
+      } else {
+        // Horizontal mode: stack widths, use max height
+        totalWidth = rects.reduce((sum, r) => sum + r.width, 0);
+        totalHeight = Math.max(...rects.map(r => r.height));
+      }
+
+      this.dragOffsetLeft = e.clientX - rects[0].left;
+      this.dragOffsetTop = e.clientY - rects[0].top;
+
+      this.placeholder = document.createElement('div');
+      this.placeholder.className = 'tab-placeholder';
+      this.placeholder.style.width = `${totalWidth}px`;
+      this.placeholder.style.height = `${totalHeight}px`;
+
+      this.draggedElements[0].parentNode.insertBefore(this.placeholder, this.draggedElements[0]);
+
+      if (this.webviewContainer) {
+        this.webviewContainer.style.pointerEvents = 'none';
+      }
+
+      this.isMovingDOM = true;
+      this.draggedElements.forEach(el => document.body.appendChild(el));
+      this.isMovingDOM = false;
+
+      try { this.primaryDragTarget.setPointerCapture(e.pointerId); } catch(err) {}
+
+      // Apply drag styles to all involved elements and capture BOTH offsets
+      this.draggedElements.forEach((el, index) => {
+        el.classList.add('dragging');
+        el.style.setProperty('position', 'fixed', 'important');
+        el.style.zIndex = '9999';
+        el.style.width = `${rects[index].width}px`;
+        el.style.height = `${rects[index].height}px`;
+        
+        el.dataset.dragOffsetX = index === 0 ? 0 : (rects[index].left - rects[0].left);
+        el.dataset.dragOffsetY = index === 0 ? 0 : (rects[index].top - rects[0].top);
+      });
+
+      this.dragTotalWidth = totalWidth;
+      this.dragTotalHeight = totalHeight;
+    }
+
+    if (this.isDragging) {
+      if (isVert) {
+        this.isOutsideContainer = Math.abs(dx) > 40; 
+      } else {
+        this.isOutsideContainer = Math.abs(dy) > 30; 
+      }
+
+      const floatLeft = e.clientX - this.dragOffsetLeft;
+      const floatTop = e.clientY - this.dragOffsetTop;
+
+      if (this.isOutsideContainer) {
+        this.draggedElements.forEach(el => {
+          const offsetX = parseFloat(el.dataset.dragOffsetX || 0);
+          const offsetY = parseFloat(el.dataset.dragOffsetY || 0);
+          el.style.left = `${floatLeft + offsetX}px`;
+          el.style.top = `${floatTop + offsetY}px`;
+        });
+        if (this.placeholder) this.placeholder.style.display = 'none';
+      } else {
+        const placeholderRect = this.placeholder.getBoundingClientRect();
+        
+        this.draggedElements.forEach(el => {
+          const offsetX = parseFloat(el.dataset.dragOffsetX || 0);
+          const offsetY = parseFloat(el.dataset.dragOffsetY || 0);
+          if (isVert) {
+            el.style.left = `${placeholderRect.left + offsetX}px`;
+            el.style.top = `${floatTop + offsetY}px`;
+          } else {
+            el.style.top = `${placeholderRect.top + offsetY}px`;
+            el.style.left = `${floatLeft + offsetX}px`;
+          }
+        });
+        
+        if (this.placeholder) this.placeholder.style.display = '';
+
+        const draggedCenterRelative = isVert ? 
+              (floatTop + this.dragTotalHeight / 2) : 
+              (floatLeft + this.dragTotalWidth / 2);
+        
+        const tabs = Array.from(this.tabContainer.querySelectorAll('.tab:not(.dragging)'));
+        
+        const logicalTargets = [];
+        for (let i = 0; i < tabs.length; i++) {
+          const tab = tabs[i];
+          
+          if (tab.classList.contains('split-left')) {
+            const nextTab = tabs[i + 1];
+            if (nextTab && nextTab.classList.contains('split-right')) {
+              const r1 = tab.getBoundingClientRect();
+              const r2 = nextTab.getBoundingClientRect();
+              
+              logicalTargets.push({
+                elementToInsertBefore: tab,
+                rect: {
+                  top: Math.min(r1.top, r2.top),
+                  left: Math.min(r1.left, r2.left),
+                  width: isVert ? Math.max(r1.width, r2.width) : (r1.width + r2.width),
+                  height: isVert ? (r1.height + r2.height) : Math.max(r1.height, r2.height)
+                }
+              });
+              
+              i++; 
+              continue;
+            }
+          }
+          
+          logicalTargets.push({
+            elementToInsertBefore: tab,
+            rect: tab.getBoundingClientRect()
+          });
+        }
+
+        let insertBeforeTab = null;
+
+        for (let target of logicalTargets) {
+          const tabCenterRelative = isVert ? 
+                (target.rect.top + target.rect.height / 2) : 
+                (target.rect.left + target.rect.width / 2);
+          
+          if (draggedCenterRelative < tabCenterRelative) {
+            insertBeforeTab = target.elementToInsertBefore;
+            break;
+          }
+        }
+
+        const targetNode = insertBeforeTab || this.tabContainer.querySelector('#add-tab');
+        if (this.placeholder.nextElementSibling !== targetNode) {
+          this.animateTabReorder(); 
+          this.tabContainer.insertBefore(this.placeholder, targetNode);
+        }
+      }
     }
   }
 
-  getDragAfterElement(container, x) {
-    // Get all draggable tabs, excluding the one being dragged
-    const draggableElements = [...container.querySelectorAll('.tab:not(.dragging)')];
+  handlePointerUp(e) {
+    if (e.type === 'pointercancel' && this.isMovingDOM) return;
 
-    return draggableElements.reduce((closest, child) => {
-      const box = child.getBoundingClientRect();
-      // Calculate the offset of the cursor from the center of the element
-      const offset = x - box.left - box.width / 2;
-      
-      // We are looking for the element that is immediately to the right of the cursor,
-      // so we want a negative offset that is closest to zero.
-      if (offset < 0 && offset > closest.offset) {
-        return { offset: offset, element: child };
-      } else {
-        return closest;
+    window.removeEventListener('pointermove', this.onPointerMove);
+    window.removeEventListener('pointerup', this.onPointerUp);
+    window.removeEventListener('pointercancel', this.onPointerUp); 
+
+    // Re-enable webview mouse events!
+    if (this.webviewContainer) {
+      this.webviewContainer.style.pointerEvents = '';
+    }
+
+    if (!this.isDragging || !this.draggedElements) {
+      if (this.primaryDragTarget) {
+        try { this.primaryDragTarget.releasePointerCapture(e.pointerId); } catch(err) {}
       }
-    }, { offset: Number.NEGATIVE_INFINITY }).element;
+      this.draggedElements = null;
+      this.primaryDragTarget = null;
+      return;
+    }
+
+    try { this.primaryDragTarget.releasePointerCapture(e.pointerId); } catch(err) {}
+    this.isDragging = false;
+    
+    const idsToMove = this.draggedElements.map(el => el.id);
+
+    if (this.isOutsideContainer && this.tabs.length > this.draggedElements.length) {
+      this.draggedElements.forEach(el => {
+        el.classList.remove('dragging');
+        el.remove();
+      });
+      
+      if (this.placeholder && this.placeholder.parentNode) {
+        this.placeholder.remove();
+      }
+      
+      this.placeholder = null;
+      this.draggedElements = null;
+      this.primaryDragTarget = null;
+      this.isOutsideContainer = false;
+
+      if (idsToMove.length === 1) {
+        this.moveTabToNewWindow(idsToMove[0]);
+      } else if (idsToMove.length === 2) {
+        this.moveSplitGroupToNewWindow(idsToMove);
+      }
+      return;
+    }
+
+    if (this.placeholder) this.placeholder.style.display = '';
+    const placeholderRect = this.placeholder ? this.placeholder.getBoundingClientRect() : { left: 0, top: 0 };
+
+    this.draggedElements.forEach(el => {
+      el.classList.remove('dragging');
+      el.style.transition = 'all 0.2s cubic-bezier(0.25, 0.8, 0.25, 1)';
+      const offsetX = parseFloat(el.dataset.dragOffsetX || 0);
+      const offsetY = parseFloat(el.dataset.dragOffsetY || 0);
+
+      if (this.placeholder) {
+        el.style.left = `${placeholderRect.left + offsetX}px`;
+        el.style.top = `${placeholderRect.top + offsetY}px`;
+      }
+    });
+
+    const elementsToCleanup = this.draggedElements;
+    this.draggedElements = null;
+    this.primaryDragTarget = null;
+
+    setTimeout(() => {
+      elementsToCleanup.forEach(el => {
+        el.style.position = '';
+        el.style.left = '';
+        el.style.top = '';
+        el.style.width = '';
+        el.style.height = '';
+        el.style.transition = '';
+        el.style.zIndex = '';
+        delete el.dataset.dragOffsetX;
+        delete el.dataset.dragOffsetY;
+
+        if (this.placeholder && this.placeholder.parentNode) {
+          this.tabContainer.insertBefore(el, this.placeholder);
+        } else {
+          this.tabContainer.appendChild(el);
+        }
+      });
+
+      if (this.placeholder) {
+        this.placeholder.remove();
+        this.placeholder = null;
+      }
+
+      const newTabOrderIds = Array.from(this.tabContainer.querySelectorAll('.tab')).map(el => el.id);
+      this.tabs.sort((a, b) => newTabOrderIds.indexOf(a.id) - newTabOrderIds.indexOf(b.id));
+
+      this.saveTabsState();
+      this.refreshGroupStyles();
+
+    }, 200);
+  }
+
+  // Split View Divider Drag Handlers
+
+  handleDividerPointerDown(e) {
+    e.preventDefault();
+
+    this.activeDividerSplit = this.getSplitForTab(this.activeTabId);
+    if (!this.activeDividerSplit) return;
+
+    this.isDraggingDivider = true;
+
+    if (this.webviewContainer) {
+      this.webviewContainer.style.pointerEvents = 'none';
+    }
+
+    const divider = document.getElementById('split-view-divider');
+    if (divider) divider.classList.add('dragging');
+
+    this.onDividerMove = this.handleDividerPointerMove.bind(this);
+    this.onDividerUp = this.handleDividerPointerUp.bind(this);
+
+    window.addEventListener('pointermove', this.onDividerMove);
+    window.addEventListener('pointerup', this.onDividerUp);
+  }
+
+  handleDividerPointerMove(e) {
+    if (!this.isDraggingDivider || !this.activeDividerSplit) return;
+
+    const containerRect = this.webviewContainer.getBoundingClientRect();
+
+    let newRatio = ((e.clientX - containerRect.left) / containerRect.width) * 100;
+
+    newRatio = Math.max(10, Math.min(newRatio, 90));
+
+    // Update the state
+    this.activeDividerSplit.splitRatio = newRatio;
+
+    const leftWv = this.webviews.get(this.activeDividerSplit.leftTabId);
+    const rightWv = this.webviews.get(this.activeDividerSplit.rightTabId);
+
+    if (leftWv && rightWv) {
+      leftWv.style.flex = `0 0 ${newRatio}%`;
+      rightWv.style.flex = `0 0 ${100 - newRatio}%`;
+    }
+  }
+
+  handleDividerPointerUp(e) {
+    if (!this.isDraggingDivider) return;
+    this.isDraggingDivider = false;
+
+    const divider = document.getElementById('split-view-divider');
+    if (divider) divider.classList.remove('dragging');
+
+    if (this.webviewContainer) {
+      this.webviewContainer.style.pointerEvents = '';
+    }
+
+    window.removeEventListener('pointermove', this.onDividerMove);
+    window.removeEventListener('pointerup', this.onDividerUp);
+
+    this.saveTabsState(); 
   }
 
   // --- P2P Protocol Helpers ---
@@ -2312,6 +3400,9 @@ restoreTabs(persistedData) {
     }
     if (url.startsWith('hyper://')) {
       return 'hyper';
+    }
+    if (url.startsWith('hs://')) {
+      return 'hs';
     }
     if (url.startsWith('web3://')) {
       return 'web3';
@@ -2333,7 +3424,7 @@ restoreTabs(persistedData) {
     let indicator = tabElement.querySelector('.p2p-indicator');
     const protocol = this._getProtocol(tab.url);
 
-    if (['ipfs', 'hyper', 'web3', 'bt'].includes(protocol)) {
+    if (['ipfs', 'hyper', 'web3', 'bt', 'hs'].includes(protocol)) {
       if (!indicator) {
         indicator = document.createElement('img');
         indicator.className = 'p2p-indicator';
@@ -2363,6 +3454,9 @@ restoreTabs(persistedData) {
         case 'ipfs':
           // Cyan filter
           filterColor = 'brightness(0) saturate(100%) invert(70%) sepia(98%) saturate(1780%) hue-rotate(154deg) brightness(101%) contrast(101%)';
+          break;
+        case 'hs':
+          filterColor = 'brightness(0) saturate(100%) invert(81%) sepia(36%) saturate(1211%) hue-rotate(266deg) brightness(95%) contrast(98%)';
           break;
         case 'ipns':
           // Gray filter

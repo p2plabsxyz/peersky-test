@@ -1,10 +1,15 @@
 import { fork } from "child_process";
 import path from "path";
+import { createLogger } from '../logger.js';
 import { fileURLToPath } from "url";
 import fs from "fs-extra";
 import { app } from "electron";
 import { generateTorrentUI } from "./bt/torrentPage.js";
 import settingsManager from "../settings-manager.js";
+import { ipcMain } from "electron";
+import parseTorrent from "parse-torrent";
+
+const log = createLogger('protocols:bt');
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,46 +23,54 @@ let requestId = 0;
 const statusCache = new Map();
 
 // Persist all torrent states (active, paused, completed) so they survive restarts
-const torrentStateCachePath = path.join(app.getPath("userData"), "bt-state.json");
+let torrentStateCachePath = null;
+function getTorrentStateCachePath() {
+  if (!torrentStateCachePath) {
+    torrentStateCachePath = path.join(app.getPath("userData"), "bt-state.json");
+  }
+  return torrentStateCachePath;
+}
 
 function loadTorrentStateCache() {
   try {
-    if (fs.existsSync(torrentStateCachePath)) {
-      const data = fs.readJsonSync(torrentStateCachePath);
+    const cachePath = getTorrentStateCachePath();
+    if (fs.existsSync(cachePath)) {
+      const data = fs.readJsonSync(cachePath);
       for (const [hash, status] of Object.entries(data)) {
         statusCache.set(hash, status);
       }
-      console.log(`[BT] Loaded ${Object.keys(data).length} torrent(s) from state cache`);
+      log.info(`[BT] Loaded ${Object.keys(data).length} torrent(s) from state cache`);
     }
   } catch (err) {
-    console.error("[BT] Failed to load torrent state cache:", err.message);
+    log.error("[BT] Failed to load torrent state cache:", err.message);
   }
 }
 
 function saveTorrentState(infoHash, status) {
   try {
-    const data = fs.existsSync(torrentStateCachePath) ? fs.readJsonSync(torrentStateCachePath) : {};
+    const cachePath = getTorrentStateCachePath();
+    const data = fs.existsSync(cachePath) ? fs.readJsonSync(cachePath) : {};
     data[infoHash] = status;
-    fs.writeJsonSync(torrentStateCachePath, data, { spaces: 2 });
+    fs.writeJsonSync(cachePath, data, { spaces: 2 });
   } catch (err) {
-    console.error("[BT] Failed to save torrent state:", err.message);
+    log.error("[BT] Failed to save torrent state:", err.message);
   }
 }
 
 function removeTorrentState(infoHash) {
   try {
-    if (fs.existsSync(torrentStateCachePath)) {
-      const data = fs.readJsonSync(torrentStateCachePath);
+    const cachePath = getTorrentStateCachePath();
+    if (fs.existsSync(cachePath)) {
+      const data = fs.readJsonSync(cachePath);
       delete data[infoHash];
-      fs.writeJsonSync(torrentStateCachePath, data, { spaces: 2 });
+      fs.writeJsonSync(cachePath, data, { spaces: 2 });
     }
   } catch (err) {
-    console.error("[BT] Failed to remove torrent state:", err.message);
+    log.error("[BT] Failed to remove torrent state:", err.message);
   }
 }
 
 // Load persisted torrent states on module init
-loadTorrentStateCache();
 
 const DEFAULT_TRACKERS = [
   "wss://tracker.openwebtorrent.com",
@@ -74,10 +87,12 @@ const DEFAULT_TRACKERS = [
 async function initializeWorker() {
   if (worker) return;
 
+  loadTorrentStateCache();
+
   const downloadPath = path.join(app.getPath("downloads"), "PeerskyTorrents");
   await fs.ensureDir(downloadPath);
 
-  console.log("[BT] Forking WebTorrent worker process...");
+  log.info("[BT] Forking WebTorrent worker process...");
   worker = fork(path.join(__dirname, "bt", "worker.js"), [downloadPath], {
     stdio: ["pipe", "pipe", "pipe", "ipc"],
   });
@@ -92,7 +107,7 @@ async function initializeWorker() {
 
   worker.on("message", (msg) => {
     if (msg.type === "ready") {
-      console.log("[BT] Worker process ready");
+      log.info("[BT] Worker process ready");
       workerReady = true;
       return;
     }
@@ -141,27 +156,28 @@ async function initializeWorker() {
   });
 
   worker.on("error", (err) => {
-    console.error("[BT] Worker error:", err);
+    log.error("[BT] Worker error:", err);
   });
 
   worker.on("exit", (code) => {
-    console.log(`[BT] Worker exited with code ${code}`);
+    log.info(`[BT] Worker exited with code ${code}`);
     worker = null;
     workerReady = false;
     
     // Save all active torrents to disk before clearing cache
     // Mark them as paused so they show resume button on restart
     try {
-      const data = fs.existsSync(torrentStateCachePath) ? fs.readJsonSync(torrentStateCachePath) : {};
+      const cachePath = getTorrentStateCachePath();
+      const data = fs.existsSync(cachePath) ? fs.readJsonSync(cachePath) : {};
       for (const [hash, status] of statusCache.entries()) {
         if (!status.done) {
           data[hash] = { ...status, paused: true };
         }
       }
-      fs.writeJsonSync(torrentStateCachePath, data, { spaces: 2 });
-      console.log(`[BT] Saved ${Object.keys(data).length} torrent state(s) on worker exit`);
+      fs.writeJsonSync(cachePath, data, { spaces: 2 });
+      log.info(`[BT] Saved ${Object.keys(data).length} torrent state(s) on worker exit`);
     } catch (err) {
-      console.error("[BT] Failed to save torrent states on exit:", err.message);
+      log.error("[BT] Failed to save torrent states on exit:", err.message);
     }
     
     statusCache.clear();
@@ -184,7 +200,7 @@ async function initializeWorker() {
     }, 10000);
   });
 
-  console.log("[BT] Worker initialized. Download path:", downloadPath);
+  log.info("[BT] Worker initialized. Download path:", downloadPath);
 }
 
 function sendCommand(action, params = {}) {
@@ -211,7 +227,7 @@ export async function createHandler() {
 
   return async function protocolHandler(request) {
     const rawUrl = request.url;
-    console.log(`[BT] Handling request: ${request.method} ${rawUrl}`);
+    log.info(`[BT] Handling request: ${request.method} ${rawUrl}`);
 
     try {
       // Determine protocol from the raw URL
@@ -261,7 +277,7 @@ export async function createHandler() {
       });
 
     } catch (err) {
-      console.error("[BT] Failed to handle request:", err);
+      log.error("[BT] Failed to handle request:", err);
       return new Response(`Error: ${err.message}`, {
         status: 500,
         headers: { "Content-Type": "text/plain" },
@@ -270,9 +286,46 @@ export async function createHandler() {
   };
 }
 
+export function setupBittorrentIpc() {
+  ipcMain.handle('resolve-torrent-file', async (event, filePath) => {
+    try {
+      if (!filePath || typeof filePath !== 'string' || !filePath.toLowerCase().endsWith('.torrent')) {
+        throw new Error('Invalid .torrent file path');
+      }
+
+      const buffer = await fs.readFile(filePath);
+      const parsed = await parseTorrent(buffer);
+
+      if (!parsed || !parsed.infoHash) {
+        throw new Error('Could not extract infoHash from file');
+      }
+
+      // Build magnet URI with trackers from the .torrent file
+      let magnetUri = `magnet:?xt=urn:btih:${parsed.infoHash}`;
+      
+      // Add display name if available
+      if (parsed.name) {
+        magnetUri += `&dn=${encodeURIComponent(parsed.name)}`;
+      }
+      
+      // Add tracker URLs from the .torrent file — this is what makes it fast
+      if (parsed.announce && parsed.announce.length > 0) {
+        const trackers = parsed.announce.map(tr => `&tr=${encodeURIComponent(tr)}`).join('');
+        magnetUri += trackers;
+      }
+
+      return magnetUri;
+    } catch (err) {
+      log.error('[BT] IPC Error resolving torrent:', err.message);
+      return null;
+    }
+  });
+}
+
+
 async function handleAPI(api, queryParams, infoHash, request) {
   const hash = queryParams.get("hash") || infoHash;
-  console.log(`[BT] API call: ${api}, hash: ${hash}`);
+  log.info(`[BT] API call: ${api}, hash: ${hash}`);
 
   // Security: validate request is from BitTorrent protocol
   // Custom protocols don't send Origin/Referer headers in Electron, so check request.url
@@ -280,7 +333,7 @@ async function handleAPI(api, queryParams, infoHash, request) {
   const isBTRequest = requestUrl.startsWith('bt://') || requestUrl.startsWith('bittorrent://') || requestUrl.startsWith('magnet:');
   
   if (!isBTRequest) {
-    console.warn(`[BT] API blocked: request not from BitTorrent protocol - url: ${requestUrl}`);
+    log.warn(`[BT] API blocked: request not from BitTorrent protocol - url: ${requestUrl}`);
     return jsonResponse({ error: 'Forbidden: API only accessible from BitTorrent protocol' }, 403);
   }
 
@@ -307,7 +360,7 @@ async function handleAPI(api, queryParams, infoHash, request) {
       return jsonResponse({ error: "Unknown API action" }, 400);
     }
   } catch (err) {
-    console.error("[BT] API error:", err);
+    log.error("[BT] API error:", err);
     return jsonResponse({ error: err.message }, 500);
   }
 }
@@ -329,7 +382,7 @@ async function startTorrent(magnetUri) {
     // Decode the magnet URI
     const decoded = decodeURIComponent(magnetUri);
     const hash = extractInfoHash(decoded);
-    console.log(`[BT] startTorrent: hash=${hash}`);
+    log.info(`[BT] startTorrent: hash=${hash}`);
 
     // Merge all trackers from the magnet + defaults
     let allTrackers = [...DEFAULT_TRACKERS];
@@ -355,7 +408,7 @@ async function startTorrent(magnetUri) {
       magnetURI: decoded,
     });
   } catch (err) {
-    console.error("[BT] startTorrent error:", err);
+    log.error("[BT] startTorrent error:", err);
     return jsonResponse({ error: err.message }, 500);
   }
 }
@@ -388,7 +441,7 @@ async function pauseResumeTorrent(action, hash) {
       if (action === "resume") {
         const cached = statusCache.get(hash);
         if (cached && cached.magnetURI) {
-          console.log(`[BT] Torrent not in worker, re-starting from cache: ${hash}`);
+          log.info(`[BT] Torrent not in worker, re-starting from cache: ${hash}`);
           removeTorrentState(hash);
           statusCache.delete(hash);
           return await startTorrent(encodeURIComponent(cached.magnetURI));
@@ -445,7 +498,7 @@ function extractInfoHash(magnetUrl) {
     
     return null;
   } catch (err) {
-    console.warn('[BT] Failed to extract infoHash:', err.message);
+    log.warn('[BT] Failed to extract infoHash:', err.message);
     return null;
   }
 }

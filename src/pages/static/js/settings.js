@@ -10,6 +10,51 @@ let settingsAPI;
 let eventCleanupFunctions = [];
 let navigationInProgress = false;
 
+// Memory Saver State
+let memoryExclusionsList = [];
+function renderExclusionList() {
+  const container = document.getElementById('exclusion-list-container');
+  if (!container) return;
+  container.innerHTML = '';
+  
+  if (memoryExclusionsList.length === 0) {
+    container.innerHTML = '<div style="color: var(--peersky-text-muted); font-style: italic; padding: 4px;">No sites added</div>';
+    return;
+  }
+
+  memoryExclusionsList.forEach((site, index) => {
+    const item = document.createElement('div');
+    item.style.display = 'flex';
+    item.style.justifyContent = 'space-between';
+    item.style.alignItems = 'center';
+    item.style.padding = '6px 4px';
+    item.style.borderBottom = '1px solid var(--peersky-border)';
+    if (index === memoryExclusionsList.length - 1) item.style.borderBottom = 'none';
+    
+    const text = document.createElement('span');
+    text.textContent = site;
+    text.style.wordBreak = 'break-all';
+    text.style.paddingRight = '12px';
+    
+    const removeBtn = document.createElement('button');
+    removeBtn.textContent = 'Remove';
+    removeBtn.className = 'btn btn-secondary';
+    removeBtn.style.padding = '4px 8px';
+    removeBtn.style.fontSize = '12px';
+    removeBtn.style.minWidth = 'fit-content';
+    
+    removeBtn.onclick = async () => {
+      memoryExclusionsList.splice(index, 1);
+      renderExclusionList();
+      await saveSettingToBackend('memorySaverExclusions', memoryExclusionsList);
+    };
+
+    item.appendChild(text);
+    item.appendChild(removeBtn);
+    container.appendChild(item);
+  });
+}
+
 function validateSearchTemplate(tpl) {
   if (typeof tpl !== "string")
     return { valid: false, reason: "Template must be a string." };
@@ -214,14 +259,31 @@ function createFallbackAPI(ipc) {
       reset: () => ipc.invoke('settings-reset'),
       clearBrowserCache: () => ipc.invoke('settings-clear-cache'),
       resetP2P: (opts = {}) => ipc.invoke('settings-reset-p2p', opts),
-      uploadWallpaper: (filePath) => ipc.invoke('settings-upload-wallpaper', filePath)
+      uploadWallpaper: (filePath) => ipc.invoke('settings-upload-wallpaper', filePath),
+      getArchiveData: () => ipc.invoke('settings-get-archive-data'),
+      exportArchive: (jsonContent) => ipc.invoke('settings-export-archive', jsonContent),
+      clearArchive: (cutoff) => ipc.invoke('settings-clear-archive', cutoff),
+      clearEnsCache: () => ipc.invoke('settings-clear-ens-cache')
     },
     onThemeChanged: (callback) => wrapCallback('theme-changed', callback),
     onSearchEngineChanged: (callback) => wrapCallback('search-engine-changed', callback),
     onShowClockChanged: (callback) => wrapCallback('show-clock-changed', callback),
+    onClockFormatChanged: (callback) => wrapCallback('clock-format-changed', callback),
     onWallpaperChanged: (callback) => wrapCallback('wallpaper-changed', callback)
   };
 }
+
+// Escape HTML to prevent XSS
+function escapeHtml(text) {
+  if (!text) return text;
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
 
 document.addEventListener('DOMContentLoaded', async () => {
   // Initialize API access
@@ -273,6 +335,17 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
       eventCleanupFunctions.push(cleanup3);
     }
+
+    if (settingsAPI.onClockFormatChanged) {
+      const cleanupFormat = settingsAPI.onClockFormatChanged((format) => {
+        const clockFormatToggle = document.getElementById('clock-format');
+        if (clockFormatToggle && clockFormatToggle.value !== format) {
+          clockFormatToggle.value = format;
+          updateCustomDropdownDisplays();
+        }
+      });
+      eventCleanupFunctions.push(cleanupFormat);
+    }
     
     if (settingsAPI.onWallpaperChanged) {
       const cleanup4 = settingsAPI.onWallpaperChanged((wallpaperType) => {
@@ -301,6 +374,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Initialize sidebar navigation
   initializeSidebarNavigation();
   
+  // Load and display app version
+  await loadAppVersion();
+  
+  // Populate wallpaper dropdown from wallpaper/defaults/
+  await populateWallpaperDropdown();
+  
   // Initialize custom dropdowns
   initializeCustomDropdowns();
   
@@ -314,6 +393,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const themeToggle = document.getElementById('theme-toggle');
   const showClock = document.getElementById('show-clock');
+  const clockFormat = document.getElementById('clock-format');
   const verticalTabs = document.getElementById('vertical-tabs');
   const keepTabsExpanded = document.getElementById('keep-tabs-expanded');
   const wallpaperSelector = document.getElementById('wallpaper-selector');
@@ -323,6 +403,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   const wallpaperPreview = document.getElementById('wallpaper-preview');
   const clearBrowserCacheBtn = document.getElementById('clear-browser-cache');
   const resetP2PBtn = document.getElementById('reset-p2p');
+  
+  const autoUpdateEnabled = document.getElementById('auto-update-enabled');
+  const memorySaverEnabled = document.getElementById('memory-saver-enabled');
+  const memoryExclusionInput = document.getElementById('memory-exclusion-input');
+  const addExclusionBtn = document.getElementById('add-exclusion-btn');
   // Handle built-in wallpaper selector change
   wallpaperSelector?.addEventListener('change', async (e) => {
     const selectedValue = e.target.value;
@@ -340,10 +425,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (confirm('Remove custom wallpaper and switch to default?')) {
       try {
         // Switch back to default wallpaper
-        await saveSettingToBackend('wallpaper', 'redwoods');
+        await saveSettingToBackend('wallpaper', 'ten_lakes');
         
         // Update UI
-        wallpaperSelector.value = 'redwoods';
+        wallpaperSelector.value = 'ten_lakes';
         updateCustomDropdownDisplays();
         updateCustomWallpaperUI(false);
         
@@ -527,6 +612,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     await saveSettingToBackend('showClock', e.target.checked);
   });
 
+  clockFormat?.addEventListener('change', async (e) => {
+    console.log('Clock format changed:', e.target.value);
+    await saveSettingToBackend('clockFormat', e.target.value);
+  });
+
   verticalTabs?.addEventListener('change', async (e) => {
     const enabled = e.target.checked;
     console.log('Vertical tabs changed:', enabled);
@@ -546,6 +636,45 @@ document.addEventListener('DOMContentLoaded', async () => {
     const keepExpanded = e.target.checked;
     console.log('Keep tabs expanded changed:', keepExpanded);
     await saveSettingToBackend('keepTabsExpanded', keepExpanded);
+  });
+
+  addExclusionBtn?.addEventListener('click', async () => {
+    const val = memoryExclusionInput?.value.trim();
+    if (!val) return;
+    
+    let processedVal = val;
+    try {
+      if (val.startsWith('http')) {
+        const url = new URL(val);
+        processedVal = url.origin + url.pathname;
+      }
+    } catch (e) {}
+    
+    if (!memoryExclusionsList.includes(processedVal)) {
+      memoryExclusionsList.push(processedVal);
+      renderExclusionList();
+      await saveSettingToBackend('memorySaverExclusions', memoryExclusionsList);
+    }
+    if (memoryExclusionInput) memoryExclusionInput.value = '';
+  });
+
+  memoryExclusionInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && addExclusionBtn) {
+      addExclusionBtn.click();
+    }
+  });
+
+  autoUpdateEnabled?.addEventListener('change', async (e) => {
+    await saveSettingToBackend('autoUpdateEnabled', e.target.checked);
+  });
+
+  memorySaverEnabled?.addEventListener('change', async (e) => {
+    const enabled = e.target.checked;
+    await saveSettingToBackend('memorySaverEnabled', enabled);
+    const exclusionsSection = document.getElementById('memory-exclusions-section');
+    if (exclusionsSection) {
+      exclusionsSection.style.display = enabled ? '' : 'none';
+    }
   });
 
   // Initialize custom wallpaper UI state
@@ -571,7 +700,13 @@ function loadDefaultSettings() {
   if (showClock) showClock.checked = true;
   if (verticalTabs) verticalTabs.checked = false;
   if (keepTabsExpanded) keepTabsExpanded.checked = false;
-  if (wallpaperSelector) wallpaperSelector.value = 'redwoods';
+  if (wallpaperSelector) wallpaperSelector.value = 'ten_lakes';
+  
+  const memorySaverEnabled = document.getElementById('memory-saver-enabled');
+  if (autoUpdateEnabled) autoUpdateEnabled.checked = true;
+  if (memorySaverEnabled) memorySaverEnabled.checked = false;
+  const exclusionsSection = document.getElementById('memory-exclusions-section');
+  if (exclusionsSection) exclusionsSection.style.display = 'none';
 }
 
 // Load settings from backend
@@ -604,9 +739,12 @@ function populateFormFields(settings) {
 
   const themeToggle = document.getElementById('theme-toggle');
   const showClock = document.getElementById('show-clock');
+  const clockFormat = document.getElementById('clock-format');
   const verticalTabs = document.getElementById('vertical-tabs');
   const keepTabsExpanded = document.getElementById('keep-tabs-expanded');
   const wallpaperSelector = document.getElementById('wallpaper-selector');
+  const autoUpdateEnabled = document.getElementById('auto-update-enabled');
+  const memorySaverEnabled = document.getElementById('memory-saver-enabled');
   
   if (searchEngine && settings.searchEngine) {
     searchEngine.value = settings.searchEngine;
@@ -653,17 +791,39 @@ function populateFormFields(settings) {
   if (showClock && typeof settings.showClock === 'boolean') {
     showClock.checked = settings.showClock;
   }
+  if (clockFormat && settings.clockFormat) {
+    clockFormat.value = settings.clockFormat;
+  }
   if (verticalTabs && typeof settings.verticalTabs === 'boolean') {
     verticalTabs.checked = settings.verticalTabs;
   }
   if (keepTabsExpanded && typeof settings.keepTabsExpanded === 'boolean') {
     keepTabsExpanded.checked = settings.keepTabsExpanded;
   }
+  
+  if (autoUpdateEnabled && typeof settings.autoUpdateEnabled === 'boolean') {
+    autoUpdateEnabled.checked = settings.autoUpdateEnabled;
+  }
+  if (memorySaverEnabled && typeof settings.memorySaverEnabled === 'boolean') {
+    memorySaverEnabled.checked = settings.memorySaverEnabled;
+  }
+  if (memorySaverEnabled) {
+    const exclusionsSection = document.getElementById('memory-exclusions-section');
+    if (exclusionsSection) {
+      exclusionsSection.style.display = memorySaverEnabled.checked ? '' : 'none';
+    }
+  }
+  
+  if (settings.memorySaverExclusions && Array.isArray(settings.memorySaverExclusions)) {
+    memoryExclusionsList = [...settings.memorySaverExclusions];
+    renderExclusionList();
+  }
+
   if (wallpaperSelector && settings.wallpaper) {
     // Only set built-in wallpaper values, ignore custom
-    if (settings.wallpaper === 'redwoods' || settings.wallpaper === 'mountains') {
+    if (settings.wallpaper !== 'custom') {
       wallpaperSelector.value = settings.wallpaper;
-    } else if (settings.wallpaper === 'custom') {
+    } else {
       // For custom wallpaper, show custom UI but keep built-in selector unchanged
       updateCustomWallpaperUI(true);
     }
@@ -702,6 +862,11 @@ function populateFormFields(settings) {
     if (ollamaModel && settings.llm.model) {
       ollamaModel.value = settings.llm.model;
     }
+
+    const llmMemoryEnabled = document.getElementById('llm-memory-enabled');
+    if (llmMemoryEnabled) {
+      llmMemoryEnabled.checked = settings.llm.memoryEnabled || false;
+    }
   }
   
   // Update custom dropdown displays after loading settings
@@ -733,6 +898,7 @@ async function saveSettingToBackend(key, value) {
       'customSearchTemplate': "Custom template updated successfully!",
       'theme': 'Theme updated successfully!',
       'showClock': 'Clock setting updated successfully!',
+      'clockFormat': 'Clock format updated successfully!',
       'wallpaper': 'Wallpaper updated successfully!',
       'verticalTabs': 'Vertical tabs setting updated successfully!'
     };
@@ -833,7 +999,7 @@ function initializeSidebarNavigation() {
   // Check for hash-based navigation (backward compatibility)
   else if (currentPath.includes('#')) {
     const hashSection = currentPath.replace('#', '');
-    if (hashSection && ['appearance', 'search','tabs', 'extensions'].includes(hashSection)) {
+    if (hashSection && ['general', 'appearance', 'search', 'tabs', 'extensions', 'archive'].includes(hashSection)) {
       targetSection = hashSection;
     }
   }
@@ -856,7 +1022,7 @@ function initializeSidebarNavigation() {
         sectionFromHistory = subpathMatch[1];
       } else if (currentPath.includes('#')) {
         const hashSection = currentPath.replace('#', '');
-        if (hashSection && ['appearance', 'search', 'extensions'].includes(hashSection)) {
+        if (hashSection && ['general', 'appearance', 'search', 'tabs', 'extensions', 'archive'].includes(hashSection)) {
           sectionFromHistory = hashSection;
         }
       }
@@ -908,6 +1074,106 @@ function updateSectionUI(sectionName) {
   const targetPage = document.getElementById(targetPageId);
   if (targetPage) {
     targetPage.classList.add('active');
+  }
+
+  // Load data for Archive section
+  if (sectionName === 'archive') {
+    loadArchiveData();
+
+    // Attach export button handler
+    const exportBtn = document.getElementById('export-archive-btn');
+    if (exportBtn && !exportBtn.dataset.bound) {
+      exportBtn.addEventListener('click', () => exportArchiveData());
+      exportBtn.dataset.bound = 'true';
+    }
+
+    // Attach clear button handler
+    const clearBtn = document.getElementById('clear-archive-btn');
+    if (clearBtn && !clearBtn.dataset.bound) {
+      clearBtn.addEventListener('click', async () => {
+        const filter = document.getElementById('export-time-filter')?.value || 'all';
+        const isAll = filter === 'all';
+        const confirmMsg = isAll
+          ? 'Are you sure you want to clear all archive data? This cannot be undone.'
+          : 'Are you sure you want to clear archive data for the selected time range? This cannot be undone.';
+        if (!confirm(confirmMsg)) return;
+        const now = Date.now();
+        const durations = { '15m': 15 * 60 * 1000, '1h': 60 * 60 * 1000, '1d': 24 * 60 * 60 * 1000, '1w': 7 * 24 * 60 * 60 * 1000 };
+        const cutoff = isAll ? 0 : now - (durations[filter] || 0);
+        try {
+          const result = await settingsAPI.settings.clearArchive(cutoff);
+          if (!result || result.success === false) {
+            const errorMsg = result && result.error ? String(result.error) : 'Unknown error';
+            showSettingsSavedMessage('Failed to clear archive: ' + errorMsg, 'error');
+            return;
+          }
+          loadArchiveData();
+          showSettingsSavedMessage(isAll ? 'Archive cleared successfully' : 'Filtered archive entries cleared');
+        } catch (err) {
+          const errorMsg = err && err.message ? err.message : String(err);
+          showSettingsSavedMessage('Failed to clear archive: ' + errorMsg, 'error');
+        }
+      });
+      clearBtn.dataset.bound = 'true';
+    }
+
+
+
+    // Attach time filter change handler
+    const timeFilter = document.getElementById('export-time-filter');
+    if (timeFilter && !timeFilter.dataset.bound) {
+      timeFilter.addEventListener('change', () => {
+        loadArchiveData();
+        updateClearBtnLabel();
+      });
+      timeFilter.dataset.bound = 'true';
+    }
+    updateClearBtnLabel();
+  }
+}
+
+function updateClearBtnLabel() {
+  const filter = document.getElementById('export-time-filter')?.value || 'all';
+  const clearBtn = document.getElementById('clear-archive-btn');
+  if (clearBtn) clearBtn.textContent = filter === 'all' ? 'Clear All' : 'Clear';
+}
+
+// Load and display app version
+async function loadAppVersion() {
+  const versionElement = document.getElementById('app-version');
+  if (!versionElement) return;
+  
+  try {
+    const version = await settingsAPI.settings.getVersion();
+    versionElement.textContent = `v${version}`;
+  } catch (error) {
+    console.error('Failed to load app version:', error);
+    versionElement.textContent = 'Unknown';
+  }
+}
+
+// Populate wallpaper dropdown dynamically
+async function populateWallpaperDropdown() {
+  const wallpaperSelect = document.getElementById('wallpaper-select');
+  if (!wallpaperSelect) return;
+  
+  const dropdown = wallpaperSelect.querySelector('.select-dropdown');
+  if (!dropdown) return;
+  
+  try {
+    const names = await settingsAPI.settings.getDefaultWallpapers();
+    if (!names || names.length === 0) return;
+    
+    dropdown.innerHTML = '';
+    names.forEach(name => {
+      const option = document.createElement('div');
+      option.className = 'select-option';
+      option.dataset.value = name;
+      option.textContent = name.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+      dropdown.appendChild(option);
+    });
+  } catch (error) {
+    console.error('Failed to populate wallpaper dropdown:', error);
   }
 }
 
@@ -1131,6 +1397,12 @@ function initializeLLMSettings() {
     // Save the complete LLM settings with the new enabled state
     await saveLLMSettings();
   });
+
+  // Memory toggle – save immediately when changed
+  const llmMemoryToggle = document.getElementById('llm-memory-enabled');
+  llmMemoryToggle?.addEventListener('change', async () => {
+    await saveLLMSettings();
+  });
   
   // Listen for download progress updates
   if (window.electronAPI) {
@@ -1260,12 +1532,15 @@ function initializeLLMSettings() {
       return;
     }
     
+    const llmMemoryEnabledInput = document.getElementById('llm-memory-enabled');
+
     // Simple settings structure config
     const settings = {
       enabled: llmEnabled?.checked || false,
       baseURL: baseURLValue,
       apiKey: apiKeyValue,
-      model: ollamaModelValue
+      model: ollamaModelValue,
+      memoryEnabled: llmMemoryEnabledInput?.checked || false
     };
     
     console.log('Saving LLM settings with model:', settings.model);
@@ -1298,6 +1573,17 @@ function initializeLLMSettings() {
         showSettingsSavedMessage(`Failed to save LLM settings: ${error.message}`, 'error');
       }
     }
+    await updateModelCapability();
+  }
+
+  async function updateModelCapability() {
+    const capEl = document.getElementById('model-capability');
+    if (!capEl) return;
+    try {
+      const info = await window._llmBridge?.modelInfo();
+      if (!info?.model) { capEl.textContent = ''; return; }
+      capEl.textContent = 'Input: ' + (info.vision ? 'text, vision' : 'text');
+    } catch { capEl.textContent = ''; }
   }
   
   // Function to update download progress
@@ -1396,6 +1682,8 @@ function initializeLLMSettings() {
       console.error('Error checking for incomplete LLM downloads:', err);
     }
   }, 100);
+
+  updateModelCapability();
   
   // Function to check for incomplete downloads and auto-resume
   async function checkForIncompleteDownloads(modelName) {

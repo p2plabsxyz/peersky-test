@@ -103,6 +103,27 @@ button:hover {
 .info-container a:hover {
   text-decoration: none;
 }
+
+.footer {
+  display: inline-block;
+  text-align: center;
+  font-size: 12px;
+  padding: 6px;
+}
+.footer img {
+  width: 123px;
+  height: auto;
+  margin-top: 10px;
+  transition: transform 0.3s, box-shadow 0.3s;
+}
+.footer a {
+  text-decoration: underline;
+  color: oklch(0.556 0 0);
+}
+.footer a:hover {
+  text-decoration: none;
+}
+
 .search-container img:hover {
   animation: heartbeat 1s infinite;
 }
