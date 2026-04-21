@@ -12,7 +12,7 @@ import settingsManager from './settings-manager.js';
 function setupAutoUpdater() {
   autoUpdater.setFeedURL({
     provider: 'github',
-    repo: 'peersky-browser',
+    repo: 'peersky-test',
     owner: 'p2plabsxyz',
   });
 
