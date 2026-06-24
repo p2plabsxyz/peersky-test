@@ -138,8 +138,13 @@ function setupWindowsUpdater () {
 
 function setupAutoUpdater () {
   if (!app.isPackaged) {
+    if (process.env.PEERSKY_TEST_UPDATE) {
+      log.info('[auto-updater] Dev mode: PEERSKY_TEST_UPDATE set — simulating the update popup.')
+      simulateUpdatePopupForDev()
+      return
+    }
     log.info('[auto-updater] Dev mode: auto-update checks run only in packaged ' +
-      'builds (1h interval after a 10s delay). Build with electron-builder to test the real flow.')
+      'builds (1h interval after a 10s delay). Set PEERSKY_TEST_UPDATE=1 to preview the popup.')
     return
   }
 
