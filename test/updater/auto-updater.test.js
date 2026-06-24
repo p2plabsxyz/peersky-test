@@ -17,11 +17,22 @@ function withPlatform (platform, fn) {
 }
 
 async function loadAutoUpdater ({ isPackaged = true, version = '1.0.0', autoUpdateEnabled = true } = {}) {
+  // Electron's native autoUpdater (macOS path).
   const autoUpdater = {
     setFeedURL: sinon.spy(),
     checkForUpdates: sinon.spy(),
     quitAndInstall: sinon.spy(),
     on: sinon.spy()
+  }
+
+  // electron-updater (Windows path). checkForUpdates() returns a Promise.
+  const winUpdater = {
+    on: sinon.spy(),
+    checkForUpdates: sinon.stub().resolves(),
+    quitAndInstall: sinon.spy(),
+    logger: null,
+    autoDownload: false,
+    autoInstallOnAppQuit: false
   }
 
   const dialog = { showMessageBoxSync: sinon.stub().returns(1) }
@@ -39,11 +50,12 @@ async function loadAutoUpdater ({ isPackaged = true, version = '1.0.0', autoUpda
 
   const module = await esmock.strict('../../src/auto-updater.js', {
     electron: { app, autoUpdater, dialog },
+    'electron-updater': { default: { autoUpdater: winUpdater } },
     'electron-log': { default: log },
     '../../src/settings-manager.js': { default: { settings: { autoUpdateEnabled } } }
   })
 
-  return { module, autoUpdater, dialog, app, log }
+  return { module, autoUpdater, winUpdater, dialog, app, log }
 }
 
 describe('auto-updater', function () {
@@ -187,5 +199,93 @@ describe('auto-updater', function () {
 
     expect(dialog.showMessageBoxSync.calledOnce).to.equal(true)
     expect(autoUpdater.quitAndInstall.called).to.equal(false)
+  })
+
+  describe('Windows (electron-updater)', function () {
+    it('uses electron-updater, not the native autoUpdater', async function () {
+      const { module, autoUpdater, winUpdater } = await loadAutoUpdater()
+
+      await withPlatform('win32', () => module.setupAutoUpdater())
+
+      expect(autoUpdater.setFeedURL.called).to.equal(false)
+      expect(autoUpdater.on.called).to.equal(false)
+      expect(winUpdater.on.called).to.equal(true)
+      expect(winUpdater.logger).to.not.equal(null)
+      expect(winUpdater.autoDownload).to.equal(true)
+    })
+
+    it('registers the expected electron-updater event handlers', async function () {
+      const { module, winUpdater } = await loadAutoUpdater()
+
+      await withPlatform('win32', () => module.setupAutoUpdater())
+
+      const events = winUpdater.on.getCalls().map((c) => c.args[0])
+      expect(events).to.include.members([
+        'checking-for-update',
+        'update-available',
+        'update-not-available',
+        'download-progress',
+        'update-downloaded',
+        'error'
+      ])
+    })
+
+    it('checks after a 10s startup delay, then on a 1h interval', async function () {
+      clock = sinon.useFakeTimers()
+      const { module, winUpdater } = await loadAutoUpdater()
+
+      await withPlatform('win32', () => module.setupAutoUpdater())
+
+      expect(winUpdater.checkForUpdates.called).to.equal(false)
+
+      await clock.tickAsync(10000)
+      expect(winUpdater.checkForUpdates.callCount).to.equal(1)
+
+      await clock.tickAsync(60 * 60 * 1000)
+      expect(winUpdater.checkForUpdates.callCount).to.equal(2)
+    })
+
+    it('logs and recovers if checkForUpdates rejects', async function () {
+      clock = sinon.useFakeTimers()
+      const { module, winUpdater, log } = await loadAutoUpdater()
+      winUpdater.checkForUpdates = sinon.stub().rejects(new Error('boom'))
+
+      await withPlatform('win32', () => module.setupAutoUpdater())
+
+      await clock.tickAsync(10000)
+      expect(log.error.calledWithMatch(/checkForUpdates failed/)).to.equal(true)
+    })
+
+    it('prompts to restart and installs when the user accepts', async function () {
+      const { module, winUpdater, dialog } = await loadAutoUpdater()
+      dialog.showMessageBoxSync.returns(0) // user clicks "Restart Now"
+
+      await withPlatform('win32', () => module.setupAutoUpdater())
+
+      const downloadedHandler = winUpdater.on
+        .getCalls()
+        .find((c) => c.args[0] === 'update-downloaded').args[1]
+
+      downloadedHandler({ version: '2.0.0', releaseName: '2.0.0' })
+
+      expect(dialog.showMessageBoxSync.calledOnce).to.equal(true)
+      expect(winUpdater.quitAndInstall.calledOnce).to.equal(true)
+    })
+
+    it('does not install when the user postpones', async function () {
+      const { module, winUpdater, dialog } = await loadAutoUpdater()
+      dialog.showMessageBoxSync.returns(1) // user clicks "Later"
+
+      await withPlatform('win32', () => module.setupAutoUpdater())
+
+      const downloadedHandler = winUpdater.on
+        .getCalls()
+        .find((c) => c.args[0] === 'update-downloaded').args[1]
+
+      downloadedHandler({ version: '2.0.0', releaseName: '2.0.0' })
+
+      expect(dialog.showMessageBoxSync.calledOnce).to.equal(true)
+      expect(winUpdater.quitAndInstall.called).to.equal(false)
+    })
   })
 })
