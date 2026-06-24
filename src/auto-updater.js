@@ -4,7 +4,7 @@ import electronUpdater from 'electron-updater'
 import settingsManager from './settings-manager.js'
 
 const UPDATE_HOST = 'https://update.electronjs.org'
-const UPDATE_REPO = 'p2plabsxyz/peersky-browser'
+const UPDATE_REPO = 'p2plabsxyz/peersky-test'
 const STARTUP_DELAY_MS = 10000
 const CHECK_INTERVAL_MS = 60 * 60 * 1000
 
@@ -48,7 +48,7 @@ function setupMacUpdater () {
     url: feedURL,
     serverType: 'json',
     headers: {
-      'User-Agent': `peersky-browser/${app.getVersion()} (${process.platform}: ${process.arch})`
+      'User-Agent': `peersky-test/${app.getVersion()} (${process.platform}: ${process.arch})`
     }
   })
 
