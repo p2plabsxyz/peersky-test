@@ -5,12 +5,13 @@
 <h1 align="center">PeerSky Browser</h1>
 
 <div align="center">
-    <img src="https://img.shields.io/github/actions/workflow/status/p2plabsxyz/peersky-browser/build.yml" alt="GitHub Actions Workflow Status">
+    <img src="https://img.shields.io/github/actions/workflow/status/p2plabsxyz/peersky-test/build.yml" alt="GitHub Actions Workflow Status">
     <img src="https://img.shields.io/badge/Platform-electron.js-black.svg" alt="platform">
-    <img src="https://img.shields.io/github/release-date-pre/p2plabsxyz/peersky-browser?color=green" alt="GitHub Pre-release" />
-    <!-- <img src="https://img.shields.io/github/v/release/p2plabsxyz/peersky-browser?color=green" alt="GitHub Release"> -->
+    <img src="https://img.shields.io/github/release-date-pre/p2plabsxyz/peersky-test?color=green" alt="GitHub Pre-release" />
+    <!-- <img src="https://img.shields.io/github/v/release/p2plabsxyz/peersky-test?color=green" alt="GitHub Release"> -->
     <a href="https://mastodon.social/@peersky"><img src="https://img.shields.io/mastodon/follow/113323887574214930" alt="Mastodon Follow"></a>
-    <a href="https://deepwiki.com/p2plabsxyz/peersky-browser"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
+    <a href="https://deepwiki.com/p2plabsxyz/peersky-test"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
+    <a href="https://standardjs.com"><img src="https://img.shields.io/badge/code_style-standard-brightgreen.svg" alt="JavaScript Style Guide"></a>
     <img src="/demo.png" width="800" alt="PeerSky Browser home page">
 </div>
 
@@ -25,7 +26,7 @@
   - [x] Reload
   - [x] Browser protocol (peersky://)
   - [x] Home page (peersky://home)
-  - [x] Cross browser themeing ([browser://theme/](https://github.com/p2plabsxyz/peersky-browser/blob/main/docs/Theme.md))
+  - [x] Cross browser themeing ([browser://theme/](https://github.com/p2plabsxyz/peersky-test/blob/main/docs/Theme.md))
   - [x] Search engine
     - DuckDuckGo (default)
     - Brave Search
@@ -55,7 +56,7 @@
   - [x] `bittorrent://` / `bt://` / `magnet:` native URLs support
   - [x] Real-time download progress UI with pause/resume
   - [x] Auto-destroy torrent on completion (no seeding)
-  - [ ] 🚧 `bt://` website seeding and hosting
+  - [x] Optional `bt://` seeding
 
 - [x] Local `file://` browsing with P2P publishing:
   - [x] Custom `file://` support with privileged access
@@ -82,6 +83,8 @@
   - [x] `peersky://p2p/p2pmd/`
     - Real-time collaborative markdown editor
     - Presentation slides mode with speaker notes
+    - Offline KaTeX math mode with inline scientific templates
+    - IEEE-style two-column research paper preview/export
     - AI-powered content generation
     - Publish to IPFS/Hypercore
     - Peers dashboard with roles, live editing status, and edit history
@@ -131,7 +134,7 @@
   - [x] Change themes
   - [x] Clear browser cache
 
-- [x] [Local LLM](https://github.com/p2plabsxyz/peersky-browser/blob/main/docs/LLM.md) integration for P2P apps:
+- [x] [Local LLM](https://github.com/p2plabsxyz/peersky-test/blob/main/docs/LLM.md) integration for P2P apps:
   - [x] `window.llm` APIs (chat + streaming, complete)
   - [x] Trusted-domain exposure (PeerSky-native + allowlist)
   - [x] AI Chat app (peersky://p2p/ai-chat/)
@@ -139,16 +142,16 @@
   - [x] P2P Editor integration (peersky://p2p/peerpad/)
     - [x] New AI generator (`ai-generator.js`) to generate code with AI
 
-  - [x] [LLM Memory](https://github.com/p2plabsxyz/peersky-browser/issues/97)
+  - [x] [LLM Memory](https://github.com/p2plabsxyz/peersky-test/issues/97)
     - [x] `llm.json` to store prompts/responses across P2P apps
     - [x] Reusable History component (P2P editor, AI chat, etc.)
     - [x] Settings toggle to enable/disable memory
     - [x] “Reset P2P Data” also clears `llm.json`
 
-- [x] [Web extensions](https://github.com/p2plabsxyz/peersky-browser/issues/19):
+- [x] [Web extensions](https://github.com/p2plabsxyz/peersky-test/issues/19):
   - [x] Ability to add and manage extensions
   - [x] [Default extensions](https://github.com/p2plabsxyz/essential-chromium-extensions)
-  - [ ] 🚧 [Decentralized Extension Distribution](https://github.com/p2plabsxyz/peersky-browser/issues/42)
+  - [ ] 🚧 [Decentralized Extension Distribution](https://github.com/p2plabsxyz/peersky-test/issues/42)
 
 - [x] Bookmarks (peersky://bookmarks):
 
@@ -204,17 +207,50 @@ npm run build-all
 
 Now, the `dist` folder will appear in the root directory.
 
+### Linting
+
+This project uses [StandardJS](https://standardjs.com) for code style. To check for lint errors:
+
+```bash
+npm run lint
+```
+
+To auto-fix lint errors:
+
+```bash
+npx standard --fix
+```
+
+### Testing
+
+Run all tests:
+
+```bash
+npm test
+```
+
+Run specific test suites:
+
+```bash
+npm run test:p2p          # Unit tests (IPFS/Hyper handlers)
+npm run test:p2p:e2e      # End-to-end sync tests (2-3 min)
+npm run test:extensions   # Extension lifecycle tests
+npm run test:security     # Security and isolation tests
+npm run test:integration  # Real app restart tests (5+ min)
+```
+
+For detailed testing documentation, see [Testing Guide](./docs/Testing.md).
+
 ### Logging
 
 For details on the Peersky logging system, see the [Logging Documentation](./docs/Logging.md). 
 
-
 ## Contribute
 
 - Thanks for your interest in contributing to PeerSky Browser. There are many ways you can contribute to the project.
-- To start, take a few minutes to read the "[contribution guide](https://github.com/p2plabsxyz/peersky-browser/blob/main/.github/CONTRIBUTING.md)".
-- We look forward to your [pull requests](https://github.com/p2plabsxyz/peersky-browser/pulls) and / or involvement in our [issues page](https://github.com/p2plabsxyz/peersky-browser/issues).
+- To start, take a few minutes to read the "[contribution guide](https://github.com/p2plabsxyz/peersky-test/blob/main/.github/CONTRIBUTING.md)".
+- We look forward to your [pull requests](https://github.com/p2plabsxyz/peersky-test/pulls) and / or involvement in our [issues page](https://github.com/p2plabsxyz/peersky-test/issues).
 
 ## License
 
-PeerSky Browser is licensed under the [MIT License](https://github.com/p2plabsxyz/peersky-browser/blob/main/LICENSE).
+PeerSky Browser is licensed under the [MIT License](https://github.com/p2plabsxyz/peersky-test/blob/main/LICENSE).

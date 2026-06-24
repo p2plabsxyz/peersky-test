@@ -4,7 +4,7 @@
 
 Peersky's tab system provides a full-featured browser tab experience with support for horizontal and vertical layouts, tab groups, pinning, drag-and-drop reordering, and a **Memory Saver** (tab suspension) feature that reduces RAM usage when tabs are idle.
 
-Tab state — including open tabs, active tab, groups, pinned status, and navigation history — is persisted to `localStorage` under the key `peersky-browser-tabs`, keyed by window ID.
+Tab state — including open tabs, active tab, groups, pinned status, and navigation history — is persisted to `localStorage` under the key `peersky-test-tabs`, keyed by window ID.
 
 ---
 

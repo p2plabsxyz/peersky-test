@@ -4,7 +4,7 @@
 
 PeerSky’s `peersky://extensions` page is the control center for managing browser extensions. You can install from the Chrome Web Store or local files, enable/disable, update, uninstall, and see toolbar actions for supported extensions.
 
-> **Note:** Not all Chrome extension APIs are supported yet (for example `chrome.debugger`, `chrome.identity`, `chrome.proxy`, `chrome.storage.sync`, and some `chrome.webRequest` behaviors). For an up‑to‑date list and roadmap, see [⚠️ Chrome Extension API Limitations in Peersky](https://github.com/p2plabsxyz/peersky-browser/issues/125).
+> **Note:** Not all Chrome extension APIs are supported yet (for example `chrome.debugger`, `chrome.identity`, `chrome.proxy`, `chrome.storage.sync`, and some `chrome.webRequest` behaviors). For an up‑to‑date list and roadmap, see [⚠️ Chrome Extension API Limitations in Peersky](https://github.com/p2plabsxyz/peersky-test/issues/125).
 
 ![Extensions Management](./images/peersky-extensions-management.png)
 

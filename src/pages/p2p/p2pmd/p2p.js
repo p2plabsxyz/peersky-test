@@ -1,4 +1,4 @@
-﻿import {
+import {
   markdownInput,
   markdownPreview,
   slidesPreview,
@@ -34,8 +34,8 @@
   fetchButton,
 
 } from "./common.js";
-import { initMarkdown, renderPreview, scheduleRender, showSpinner, renderMarkdown } from "./noteEditor.js";
-import { initToolbar } from "./toolbar.js";
+import { initMarkdown, renderPreview, scheduleRender, showSpinner, renderMarkdown, renderDocument } from "./noteEditor.js";
+import { initToolbar, applySynchronizedLatexMode } from "./toolbar.js";
 import { initCursorOverlay, updateCursorOverlay, destroyCursorOverlay,
          setLocalColor, updateLineAuthors } from "./cursorOverlay.js";
 
@@ -58,6 +58,8 @@ let justCreatedRoom = false;
 
 let ydoc = null;
 let ytext = null;
+let ysettings = null;
+let ysettingsObserver = null;
 let pendingUpdate = null;
 let sendUpdateTimer = null;
 let flushRetryTimer = null;
@@ -66,11 +68,13 @@ const MAX_FLUSH_RETRIES = 10;
 let prevText = "";
 let isApplyingRemote = false;
 let savedYjsState = null; // Save Yjs CRDT state (not just text) for proper merge on reconnect
+let hasSyncedLatexModeFromRoom = false;
 let currentRole = null;
 let reconnectTimer = null;
 let isRecoveringYjsState = false;
 const MAX_PENDING_UPDATE_BYTES = 2 * 1024 * 1024;
 const Y_ORIGIN_REMOTE = "remote-sse";
+const Y_ORIGIN_LOCAL = "local-input";
 
 const ROOM_STATE_PREFIX = "p2pmd-room-";
 const ROOM_CONTENT_PREFIX = "p2pmd-room-content-";
@@ -81,6 +85,9 @@ const PEER_ACTIVITY_PREFIX = "p2pmd-peer-activity-";
 const ACTIVE_ROOM_STATUS_KEY = "p2pmd-active-room";
 const LAST_ROOM_KEY = "p2pmd-last-room";
 const LAST_ROOM_STATE = "p2pmd-last-room-state";
+const LATEX_MODE_SYNC_EVENT = "p2pmd:latex-mode-sync";
+const ROOM_SETTINGS_MAP_NAME = "settings";
+const ROOM_SETTINGS_LATEX_MODE_KEY = "latexModeEnabled";
 const DISPLAY_NAME_KEY = "p2pmd-display-name";
 const USER_COLOR_KEY = "p2pmd-user-color";
 const CLIENT_ID_KEY = "p2pmd-client-id";
@@ -91,6 +98,7 @@ const TYPING_IDLE_MS = 1200;
 const PEER_FALLBACK_NAME_LEN = 8;
 const saveDelay = 2000;
 let hyperSaveInFlight = false;
+let lineAttributionHyperSaveInFlight = false;
 let draftSaveInFlight = false;
 const draftSnapshotCache = new Map();
 let currentPeerList = [];
@@ -103,6 +111,44 @@ let lastPresencePayload = "";
 const onboardingPage = document.getElementById("onboarding-page");
 const onboardingNameInput = document.getElementById("onboarding-name");
 const onboardingSubmitButton = document.getElementById("onboard-submit");
+
+function diffLineAttributionMaps(beforeMap, afterMap) {
+  const before = normalizeLineAttributions(beforeMap) || {};
+  const after = normalizeLineAttributions(afterMap) || {};
+  const beforeKeys = new Set(Object.keys(before));
+  const afterKeys = new Set(Object.keys(after));
+  const added = [];
+  const removed = [];
+  const changed = [];
+
+  for (const line of afterKeys) {
+    if (!beforeKeys.has(line)) {
+      added.push(line);
+      continue;
+    }
+    const b = before[line];
+    const a = after[line];
+    if ((b?.color || "") !== (a?.color || "") || (b?.name || "") !== (a?.name || "")) {
+      changed.push(line);
+    }
+  }
+  for (const line of beforeKeys) {
+    if (!afterKeys.has(line)) removed.push(line);
+  }
+
+  const numericSort = (x, y) => Number(x) - Number(y);
+  added.sort(numericSort);
+  removed.sort(numericSort);
+  changed.sort(numericSort);
+  return {
+    addedCount: added.length,
+    removedCount: removed.length,
+    changedCount: changed.length,
+    addedPreview: added.slice(0, 12),
+    removedPreview: removed.slice(0, 12),
+    changedPreview: changed.slice(0, 12)
+  };
+}
 
 const publishCSS = `
   @font-face {
@@ -149,6 +195,243 @@ const publishCSS = `
   }
   footer.p2pmd-footer a {
     color: inherit;
+  }
+`;
+
+let _katexCSSCachePromise = null;
+const katexCssUrl = new URL("./lib/katex.min.css", import.meta.url);
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function loadKatexCSS() {
+  if (_katexCSSCachePromise) return _katexCSSCachePromise;
+
+  _katexCSSCachePromise = (async () => {
+    try {
+      const resp = await fetch(katexCssUrl);
+      if (!resp.ok) return "";
+
+      let css = await resp.text();
+      const fontPathMatches = [...css.matchAll(/url\((['"]?)(\.\.\/assets\/fonts\/[^'")?#]+)\1\)/g)];
+      const uniqueFontPaths = [...new Set(fontPathMatches.map((match) => match[2]))]
+        .filter((fontPath) => fontPath.toLowerCase().endsWith(".woff2"));
+
+      await Promise.all(uniqueFontPaths.map(async (fontPath) => {
+        try {
+          const fontUrl = new URL(fontPath, katexCssUrl);
+          const fontResp = await fetch(fontUrl);
+          if (!fontResp.ok) return;
+
+          const extension = fontPath.split(".").pop()?.toLowerCase();
+          const mimeType = extension === "woff2"
+            ? "font/woff2"
+            : extension === "woff"
+              ? "font/woff"
+              : "font/ttf";
+          const base64 = arrayBufferToBase64(await fontResp.arrayBuffer());
+          css = css.replaceAll(fontPath, `data:${mimeType};base64,${base64}`);
+        } catch (fontError) {
+          console.warn("[loadKatexCSS] Failed to inline KaTeX font:", fontPath, fontError);
+        }
+      }));
+
+      css = css.replace(/,url\(\.\.\/assets\/fonts\/[^)]+\.woff\) format\("woff"\),url\(\.\.\/assets\/fonts\/[^)]+\.ttf\) format\("truetype"\)/g, "");
+
+      return css;
+    } catch (err) {
+      console.warn("[loadKatexCSS] Failed to load local KaTeX CSS:", err);
+      return "";
+    }
+  })();
+
+  try {
+    return await _katexCSSCachePromise;
+  } catch (error) {
+    _katexCSSCachePromise = null;
+    throw error;
+  }
+}
+
+const ieeePaperCSS = `
+  @page {
+    size: A4;
+    margin: 0.75in 0.625in 1in;
+  }
+  body.ieee-paper {
+    font-family: 'Times New Roman', Times, serif;
+    font-size: 10pt;
+    line-height: 1.45;
+    margin: 0;
+    padding: 0;
+    background: #ffffff;
+    color: #111111;
+  }
+  body.ieee-paper .ieee-paper-shell {
+    box-sizing: border-box;
+    max-width: 210mm;
+    margin: 0 auto;
+    padding: 0.75in 0.625in 1in;
+  }
+  body.ieee-paper .ieee-paper-layout {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1in;
+  }
+  body.ieee-paper .ieee-frontmatter {
+    text-align: center;
+    margin: 0 0 0.12in;
+  }
+  body.ieee-paper .ieee-title {
+    text-align: center;
+    line-height: 1.15;
+    margin: 0 0 0.08in;
+  }
+  body.ieee-paper .ieee-authors {
+    max-width: 6.9in;
+    margin: 0 auto;
+  }
+  body.ieee-paper .ieee-authors-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.06in 0.16in;
+    align-items: start;
+  }
+  body.ieee-paper .ieee-author-col {
+    min-width: 0;
+  }
+  body.ieee-paper .ieee-author-col p {
+    margin: 0 0 0.04in;
+    text-align: center;
+    text-indent: 0;
+    line-height: 1.2;
+  }
+  body.ieee-paper .ieee-authors-note {
+    margin-top: 0.03in;
+    text-align: center;
+    line-height: 1.2;
+  }
+  body.ieee-paper .ieee-columns {
+    column-count: 2;
+    column-gap: 0.25in;
+    column-fill: balance;
+    -webkit-column-fill: balance;
+    border-top: 1px solid #9ca3af;
+    padding-top: 0.08in;
+  }
+  body.ieee-paper .ieee-columns > * {
+    break-inside: auto;
+    page-break-inside: auto;
+  }
+  body.ieee-paper .ieee-columns > :is(figure, table, pre, blockquote, ul, ol) {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  body.ieee-paper .ieee-columns > :is(h1, h2, h3, h4, h5, h6):first-child {
+    -webkit-column-span: all;
+    column-span: all;
+    text-align: center;
+    line-height: 1.18;
+    margin: 0 0 0.14in;
+  }
+  body.ieee-paper .ieee-columns > :is(h2, h3, h4, h5, h6) {
+    text-align: center;
+  }
+  body.ieee-paper .ieee-abstract-heading {
+    text-align: center;
+  }
+  body.ieee-paper p {
+    margin: 0 0 0.11in;
+    text-align: justify;
+    text-indent: 0;
+  }
+  body.ieee-paper a {
+    color: #111111;
+    text-decoration: none;
+  }
+  body.ieee-paper a:hover {
+    color: #111111;
+    text-decoration: underline;
+  }
+  body.ieee-paper .ieee-columns ul,
+  body.ieee-paper .ieee-columns ol,
+  body.ieee-paper .ieee-columns pre,
+  body.ieee-paper .ieee-columns table,
+  body.ieee-paper .ieee-columns blockquote {
+    text-indent: 0;
+  }
+  body.ieee-paper ul,
+  body.ieee-paper ol {
+    margin: 0 0 0.12in 0.22in;
+    padding-left: 0.12in;
+  }
+  body.ieee-paper table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 8.5pt;
+    margin: 0 0 0.12in;
+  }
+  body.ieee-paper th,
+  body.ieee-paper td {
+    border: 1px solid #9ca3af;
+    padding: 3px 6px;
+    text-align: left;
+  }
+  body.ieee-paper th {
+    background: #f5f5f5;
+  }
+  body.ieee-paper figure,
+  body.ieee-paper table,
+  body.ieee-paper pre,
+  body.ieee-paper blockquote {
+    break-inside: avoid;
+  }
+  body.ieee-paper figure,
+  body.ieee-paper p:has(> img:only-child) {
+    text-align: center;
+    margin: 0 0 0.12in;
+    text-indent: 0;
+  }
+  body.ieee-paper figcaption {
+    font-size: 8pt;
+    margin-top: 0.05in;
+  }
+  body.ieee-paper img {
+    max-width: 100%;
+    height: auto;
+    display: inline-block;
+  }
+  body.ieee-paper pre,
+  body.ieee-paper code {
+    font-size: 8.5pt;
+  }
+  @media print {
+    body.ieee-paper {
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+    body.ieee-paper .ieee-columns {
+      column-fill: auto;
+      -webkit-column-fill: auto;
+    }
+    body.ieee-paper .ieee-paper-layout {
+      display: block;
+      gap: 0;
+    }
+    body.ieee-paper .ieee-paper-shell {
+      max-width: none;
+      padding: 0;
+    }
+    body.ieee-paper footer.p2pmd-footer {
+      display: none;
+    }
   }
 `;
 
@@ -223,6 +506,18 @@ function clearLocalLineAttributions(roomKey) {
   }
 }
 
+function filterLineAttributionsByClientId(lineAttributions, clientId) {
+  if (!clientId) return {};
+  const normalized = normalizeLineAttributions(lineAttributions);
+  if (!normalized) return {};
+  const filtered = {};
+  for (const [line, info] of Object.entries(normalized)) {
+    if ((info?.clientId || "") !== clientId) continue;
+    filtered[line] = info;
+  }
+  return filtered;
+}
+
 function persistRoomLineAttributionsNow() {
   if (!currentRoomKey) return;
   const normalizedRoom = normalizeLineAttributions(_roomLineAttributions);
@@ -251,6 +546,7 @@ function persistRoomLineAttributionsNow() {
       updatedAt: Date.now()
     }));
   }
+  saveRoomLineAttributionsToHyperdrive(currentRoomKey, normalizedRoom);
 }
 
 function scheduleRoomLineAttributionsPersist() {
@@ -259,6 +555,30 @@ function scheduleRoomLineAttributionsPersist() {
     lineAttributionPersistTimer = null;
     persistRoomLineAttributionsNow();
   }, 250);
+}
+
+function getLocalLatexMode() {
+  return Boolean(window.latexModeEnabled);
+}
+
+function applyRemoteLatexMode(enabled) {
+  if (typeof enabled !== "boolean") return;
+  if (getLocalLatexMode() === enabled) return;
+  applySynchronizedLatexMode(enabled);
+}
+
+function syncLatexModeFromRoomOnce(enabled) {
+  if (currentRole === "host") return;
+  if (hasSyncedLatexModeFromRoom) return;
+  if (typeof enabled !== "boolean") return;
+  applyRemoteLatexMode(enabled);
+  hasSyncedLatexModeFromRoom = true;
+}
+
+function publishLatexModeToRoomSettings(enabled) {
+  if (!ysettings || typeof enabled !== "boolean") return;
+  if (ysettings.get(ROOM_SETTINGS_LATEX_MODE_KEY) === enabled) return;
+  ysettings.set(ROOM_SETTINGS_LATEX_MODE_KEY, enabled);
 }
 
 function buildRandomClientId() {
@@ -640,6 +960,12 @@ function parseLocalUrl(value) {
   return { host: trimmed, port: null };
 }
 
+function parseBooleanParam(value) {
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return null;
+}
+
 function normalizeRoomKey(key) {
   if (!key || typeof key !== "string") return "";
   return key.trim();
@@ -688,6 +1014,8 @@ function updateRoomUrl(state) {
     if (state.localUrl) params.set("localUrl", state.localUrl);
     if (typeof state.secure === "boolean") params.set("secure", String(state.secure));
     if (typeof state.udp === "boolean") params.set("udp", String(state.udp));
+    if (typeof state.hosted === "boolean") params.set("hosted", String(state.hosted));
+    if (typeof state.creator === "boolean") params.set("creator", String(state.creator));
     if (state.host) params.set("host", state.host);
     if (state.port) params.set("port", String(state.port));
   } else {
@@ -695,6 +1023,8 @@ function updateRoomUrl(state) {
     params.delete("localUrl");
     params.delete("secure");
     params.delete("udp");
+    params.delete("hosted");
+    params.delete("creator");
     params.delete("host");
     params.delete("port");
   }
@@ -708,11 +1038,15 @@ function readRoomStateFromUrl() {
   const params = new URLSearchParams(window.location.search);
   const key = normalizeRoomKey(params.get("roomKey") || "");
   if (!key) return null;
+  const hosted = parseBooleanParam(params.get("hosted"));
+  const creator = parseBooleanParam(params.get("creator"));
   return {
     key,
     localUrl: params.get("localUrl") || "",
     secure: params.get("secure") === "true",
     udp: params.get("udp") === "true",
+    ...(hosted === null ? {} : { hosted }),
+    ...(creator === null ? {} : { creator }),
     host: params.get("host") || "",
     port: normalizePort(params.get("port"), null)
   };
@@ -795,6 +1129,7 @@ export function scheduleSend() {
             clientId: localClientId,
             role: currentRole || "client",
             name: getDisplayName(),
+            latexModeEnabled: getLocalLatexMode(),
             ...getCurrentCursorPayload(),
             lineAttributions: getLineAttributionsPayload()
           })
@@ -818,9 +1153,9 @@ export function scheduleSend() {
     prevText = oldText;
     return;
   }
-  _attributeCurrentLine();
+  applyTextDiff(ytext, oldText, newText, Y_ORIGIN_LOCAL);
+  _attributeLocalEditRange(oldText, newText);
   updateLineAuthors(_roomLineAttributions);
-  applyTextDiff(ytext, oldText, newText);
   prevText = newText;
 }
 
@@ -836,9 +1171,86 @@ function _attributeCurrentLine() {
     const name  = getDisplayName() || truncateIdentifier(localClientId, PEER_FALLBACK_NAME_LEN);
     const color = currentPeerList.find((p) => p.clientId === localClientId)?.color || _localFallbackColor();
     if (!color) return;
-    _localLineAttributions[String(line)] = { name, color };
-    _roomLineAttributions[String(line)] = { name, color };
+    const entry = { name, color, clientId: localClientId || "", updatedAt: Date.now() };
+    _localLineAttributions[String(line)] = entry;
+    _roomLineAttributions[String(line)] = entry;
     scheduleRoomLineAttributionsPersist();
+  } catch {}
+}
+
+function _attributeLocalEditRange(oldText, newText) {
+  try {
+    const oldValue = typeof oldText === "string" ? oldText : "";
+    const newValue = typeof newText === "string" ? newText : "";
+    if (oldValue === newValue) return;
+
+    let prefixLen = 0;
+    let oldSuffix = oldValue.length;
+    let newSuffix = newValue.length;
+
+    const isPurePrepend = newValue.length > oldValue.length && newValue.endsWith(oldValue);
+    const isPureAppend = newValue.length > oldValue.length && newValue.startsWith(oldValue);
+
+    if (isPurePrepend) {
+      prefixLen = 0;
+      oldSuffix = 0;
+      newSuffix = newValue.length - oldValue.length;
+    } else if (isPureAppend) {
+      prefixLen = oldValue.length;
+      oldSuffix = oldValue.length;
+      newSuffix = newValue.length;
+    } else {
+   
+      const minLen = Math.min(oldValue.length, newValue.length);
+      while (prefixLen < minLen && oldValue[prefixLen] === newValue[prefixLen]) prefixLen += 1;
+      while (oldSuffix > prefixLen && newSuffix > prefixLen &&
+            oldValue[oldSuffix - 1] === newValue[newSuffix - 1]) {
+        oldSuffix -= 1;
+        newSuffix -= 1;
+      }
+    }
+
+    const deleteLen = oldSuffix - prefixLen;
+    const inserted = newValue.slice(prefixLen, newSuffix);
+    const deletedSlice = deleteLen > 0 ? oldValue.slice(prefixLen, oldSuffix) : "";
+    const deletedLineBreaks = countLineBreaks(deletedSlice);
+    const syntheticDelta = [];
+    if (prefixLen > 0) syntheticDelta.push({ retain: prefixLen });
+    if (deleteLen > 0) syntheticDelta.push({ delete: deleteLen });
+    if (inserted) syntheticDelta.push({ insert: inserted });
+
+    if (syntheticDelta.length > 0) {
+      const shiftedRoom = shiftLineAttributionsByDelta(_roomLineAttributions, oldValue, syntheticDelta);
+      if (shiftedRoom.changed) _roomLineAttributions = shiftedRoom.map;
+      const shiftedLocal = shiftLineAttributionsByDelta(_localLineAttributions, oldValue, syntheticDelta);
+      if (shiftedLocal.changed) _localLineAttributions = shiftedLocal.map;
+    }
+
+
+    if (deleteLen > 0 && inserted.length === 0 && deletedLineBreaks > 0) {
+      updateLineAuthors(_roomLineAttributions);
+      return;
+    }
+
+    let startLine = lineNumberAtOffset(newValue, prefixLen);
+    let touchedLineCount = 1;
+    if (inserted.length > 0) {
+      const insertionAtLineStart = isOffsetAtLineStart(oldValue, prefixLen);
+      const startsWithNewline = inserted.startsWith("\n");
+      const endsWithNewline = inserted.endsWith("\n");
+
+      if (!insertionAtLineStart && startsWithNewline) {
+        startLine += 1;
+      }
+
+      touchedLineCount = countLineBreaks(inserted) + (endsWithNewline ? 0 : 1);
+      if (!insertionAtLineStart && startsWithNewline) {
+        touchedLineCount -= 1;
+      }
+      touchedLineCount = Math.max(1, touchedLineCount);
+    }
+    const endLine = startLine + touchedLineCount - 1;
+    attributeLocalLineRange(startLine, endLine);
   } catch {}
 }
 
@@ -857,6 +1269,7 @@ function attributeLocalLineRange(startLine, endLine, { reset = false } = {}) {
   const name = getDisplayName() || truncateIdentifier(localClientId, PEER_FALLBACK_NAME_LEN);
   const color = currentPeerList.find((p) => p.clientId === localClientId)?.color || _localFallbackColor();
   if (!color) return;
+  const now = Date.now();
 
   if (reset) {
     _localLineAttributions = {};
@@ -865,7 +1278,12 @@ function attributeLocalLineRange(startLine, endLine, { reset = false } = {}) {
 
   for (let line = start; line <= end; line += 1) {
     const lineKey = String(line);
-    const entry = { name, color };
+    const entry = {
+      name,
+      color,
+      clientId: localClientId || "",
+      updatedAt: now
+    };
     _localLineAttributions[lineKey] = entry;
     _roomLineAttributions[lineKey] = entry;
   }
@@ -883,7 +1301,7 @@ export function attributeLocalWholeDocument({ reset = false, broadcastPresence =
   }
 }
 
-function mergeLineAttributionsIntoRoom(value) {
+function mergeLineAttributionsIntoRoom(value, source = "unknown") {
   if (!value || typeof value !== "object") return;
   let changed = false;
   for (const [line, info] of Object.entries(value)) {
@@ -892,19 +1310,44 @@ function mergeLineAttributionsIntoRoom(value) {
     if (!info || typeof info !== "object" || typeof info.color !== "string") continue;
     const lineKey = String(Math.floor(lineNum));
     const prevValue = _roomLineAttributions[lineKey];
+    const incomingUpdatedAt = Number.isFinite(Number(info.updatedAt)) ? Number(info.updatedAt) : 0;
+    const incomingClientId = typeof info.clientId === "string" ? info.clientId : "";
+    const prevUpdatedAt = Number.isFinite(Number(prevValue?.updatedAt)) ? Number(prevValue.updatedAt) : 0;
+    const prevClientId = typeof prevValue?.clientId === "string" ? prevValue.clientId : "";
+
+    if (
+      prevValue &&
+      compareLineAttributionCandidates(
+        { updatedAt: incomingUpdatedAt, clientId: incomingClientId },
+        { updatedAt: prevUpdatedAt, clientId: prevClientId }
+      ) < 0
+    ) {
+      continue;
+    }
+
     const incomingName = typeof info.name === "string" ? info.name.trim() : "";
     const colorMatchedPeer = currentPeerList.find((peer) => peer?.color === info.color && peer?.name);
     const resolvedName = incomingName || colorMatchedPeer?.name || prevValue?.name || "";
     const nextValue = {
       name: resolvedName,
-      color: info.color
+      color: info.color,
+      clientId: incomingClientId || prevClientId || "",
+      updatedAt: incomingUpdatedAt || prevUpdatedAt || 0
     };
-    if (!prevValue || prevValue.name !== nextValue.name || prevValue.color !== nextValue.color) {
+    if (
+      !prevValue ||
+      prevValue.name !== nextValue.name ||
+      prevValue.color !== nextValue.color ||
+      (prevValue.clientId || "") !== (nextValue.clientId || "") ||
+      Number(prevValue.updatedAt || 0) !== Number(nextValue.updatedAt || 0)
+    ) {
       _roomLineAttributions[lineKey] = nextValue;
       changed = true;
     }
   }
-  if (changed) scheduleRoomLineAttributionsPersist();
+  if (changed) {
+    scheduleRoomLineAttributionsPersist();
+  }
 }
 
 function refreshRoomAttributionNamesFromPeerList() {
@@ -925,6 +1368,7 @@ function refreshRoomAttributionNamesFromPeerList() {
     const [resolvedName] = Array.from(names);
     if (resolvedName && info.name !== resolvedName) {
       _roomLineAttributions[lineKey] = {
+        ...info,
         name: resolvedName,
         color: info.color
       };
@@ -939,6 +1383,143 @@ function refreshRoomAttributionNamesFromPeerList() {
 
 function refreshLocalLineAttribution() {
   updateLineAuthors(_roomLineAttributions);
+}
+
+function countLineBreaks(value) {
+  if (typeof value !== "string" || value.length === 0) return 0;
+  let count = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    if (value[i] === "\n") count += 1;
+  }
+  return count;
+}
+
+function lineNumberAtOffset(text, offset) {
+  const source = typeof text === "string" ? text : "";
+  const clamped = Math.max(0, Math.min(Number(offset) || 0, source.length));
+  let line = 1;
+  for (let i = 0; i < clamped; i += 1) {
+    if (source[i] === "\n") line += 1;
+  }
+  return line;
+}
+
+function isOffsetAtLineStart(text, offset) {
+  const source = typeof text === "string" ? text : "";
+  const clamped = Math.max(0, Math.min(Number(offset) || 0, source.length));
+  return clamped === 0 || source[clamped - 1] === "\n";
+}
+
+function shiftLineAttributionsAfterLine(
+  map,
+  afterLineExclusive,
+  lineDelta,
+  { dropRangeStart = null, dropRangeEnd = null } = {}
+) {
+  if (!map || typeof map !== "object" || !Number.isFinite(lineDelta) || lineDelta === 0) {
+    return { changed: false, map };
+  }
+  const normalized = normalizeLineAttributions(map) || {};
+  const lineNumbers = Object.keys(normalized)
+    .map((line) => Number(line))
+    .filter((line) => Number.isFinite(line) && line >= 1)
+    .sort((a, b) => a - b);
+
+  let changed = false;
+  const shifted = {};
+  const hasDropRange = Number.isFinite(dropRangeStart) && Number.isFinite(dropRangeEnd) && dropRangeEnd >= dropRangeStart;
+  for (const line of lineNumbers) {
+    const lineKey = String(line);
+    const entry = normalized[lineKey];
+    if (hasDropRange && line >= dropRangeStart && line <= dropRangeEnd) {
+      changed = true;
+      continue;
+    }
+    const nextLine = line > afterLineExclusive ? line + lineDelta : line;
+    if (nextLine !== line) changed = true;
+    if (nextLine < 1) {
+      changed = true;
+      continue;
+    }
+    const nextLineKey = String(nextLine);
+    if (Object.prototype.hasOwnProperty.call(shifted, nextLineKey)) {
+      changed = true;
+      continue;
+    }
+    shifted[nextLineKey] = entry;
+  }
+  return changed ? { changed: true, map: shifted } : { changed: false, map };
+}
+
+function shiftLineAttributionsByDelta(map, oldText, delta) {
+  if (!map || typeof map !== "object" || !Array.isArray(delta) || delta.length === 0) {
+    return { changed: false, map, operations: [] };
+  }
+  let working = map;
+  let changed = false;
+  let oldCursor = 0;
+  const operations = [];
+  const baseText = typeof oldText === "string" ? oldText : "";
+
+  for (const op of delta) {
+    if (op && typeof op.retain === "number" && op.retain > 0) {
+      oldCursor += op.retain;
+      continue;
+    }
+    if (op && typeof op.insert === "string") {
+      const insertedLineBreaks = countLineBreaks(op.insert);
+      if (insertedLineBreaks > 0) {
+        const anchorLine = lineNumberAtOffset(baseText, oldCursor);
+        const afterLineExclusive = isOffsetAtLineStart(baseText, oldCursor)
+          ? anchorLine - 1
+          : anchorLine;
+        const shifted = shiftLineAttributionsAfterLine(working, afterLineExclusive, insertedLineBreaks);
+        if (shifted.changed) {
+          working = shifted.map;
+          changed = true;
+          operations.push({
+            kind: "insert",
+            atOffset: oldCursor,
+            afterLineExclusive,
+            lineDelta: insertedLineBreaks
+          });
+        }
+      }
+      continue;
+    }
+    if (op && typeof op.delete === "number" && op.delete > 0) {
+      const deletedSlice = baseText.slice(oldCursor, Math.min(baseText.length, oldCursor + op.delete));
+      const deletedLineBreaks = countLineBreaks(deletedSlice);
+      if (deletedLineBreaks > 0) {
+        const anchorLine = lineNumberAtOffset(baseText, oldCursor);
+      
+        const deletedStartLine = isOffsetAtLineStart(baseText, oldCursor)
+          ? anchorLine
+          : anchorLine + 1;
+        const deletedEndLine = deletedStartLine + deletedLineBreaks - 1;
+        const shifted = shiftLineAttributionsAfterLine(
+          working,
+          deletedEndLine,
+          -deletedLineBreaks,
+          { dropRangeStart: deletedStartLine, dropRangeEnd: deletedEndLine }
+        );
+        if (shifted.changed) {
+          working = shifted.map;
+          changed = true;
+          operations.push({
+            kind: "delete",
+            atOffset: oldCursor,
+            afterLineExclusive: deletedEndLine,
+            removedLines: [deletedStartLine, deletedEndLine],
+            lineDelta: -deletedLineBreaks
+          });
+        }
+      }
+      oldCursor += op.delete;
+    }
+  }
+
+  return changed ? { changed: true, map: working, operations } : { changed: false, map, operations: [] };
 }
 
 function syncLocalLineAttributionNames() {
@@ -985,17 +1566,32 @@ function base64ToBytes(b64) {
 }
 function applyTextDiff(ytextRef, oldText, newText, origin = null) {
   if (!ytextRef || oldText === newText) return;
-  // Trim unchanged edges so we emit one minimal delete/insert change.
   let prefixLen = 0;
-  const minLen = Math.min(oldText.length, newText.length);
-  while (prefixLen < minLen && oldText[prefixLen] === newText[prefixLen]) prefixLen++;
   let oldSuffix = oldText.length;
   let newSuffix = newText.length;
-  while (oldSuffix > prefixLen && newSuffix > prefixLen &&
-         oldText[oldSuffix - 1] === newText[newSuffix - 1]) {
-    oldSuffix--;
-    newSuffix--;
+
+  const isPurePrepend = newText.length > oldText.length && newText.endsWith(oldText);
+  const isPureAppend = newText.length > oldText.length && newText.startsWith(oldText);
+
+  if (isPurePrepend) {
+    prefixLen = 0;
+    oldSuffix = 0;
+    newSuffix = newText.length - oldText.length;
+  } else if (isPureAppend) {
+    prefixLen = oldText.length;
+    oldSuffix = oldText.length;
+    newSuffix = newText.length;
+  } else {
+    // Trim unchanged edges so we emit one minimal delete/insert change.
+    const minLen = Math.min(oldText.length, newText.length);
+    while (prefixLen < minLen && oldText[prefixLen] === newText[prefixLen]) prefixLen++;
+    while (oldSuffix > prefixLen && newSuffix > prefixLen &&
+          oldText[oldSuffix - 1] === newText[newSuffix - 1]) {
+      oldSuffix--;
+      newSuffix--;
+    }
   }
+
   const deleteLen = oldSuffix - prefixLen;
   const insertStr = newText.slice(prefixLen, newSuffix);
   ytextRef.doc.transact(() => {
@@ -1026,6 +1622,7 @@ function buildPresencePayload() {
     role: currentRole || "client",
     name: getDisplayName(),
     color: getLocalPeerColor(),
+    latexModeEnabled: getLocalLatexMode(),
     ...cursor,
     isTyping: isLocalTyping,
     lineAttributions
@@ -1087,6 +1684,7 @@ async function flushYjsUpdate() {
         role: currentRole || "client",
         name: getDisplayName(),
         color: getLocalPeerColor(),
+        latexModeEnabled: getLocalLatexMode(),
         ...getCurrentCursorPayload(),
         lineAttributions: outgoingLineAttributions
       })
@@ -1160,8 +1758,13 @@ function destroyYjs(skipSave = false, clearLineAttributions = true) {
   }
 
   pendingUpdate = null;
+  if (ysettings && ysettingsObserver) {
+    try { ysettings.unobserve(ysettingsObserver); } catch {}
+    ysettingsObserver = null;
+  }
   if (ydoc) { try { ydoc.destroy(); } catch {} ydoc = null; }
   ytext = null;
+  ysettings = null;
   prevText = "";
   isApplyingRemote = false;
   if (clearLineAttributions) {
@@ -1190,6 +1793,7 @@ async function postContentNow() {
         role: currentRole || "client",
         name: getDisplayName(),
         color: getLocalPeerColor(),
+        latexModeEnabled: getLocalLatexMode(),
         ...getCurrentCursorPayload(),
         lineAttributions: outgoingLineAttributions
       })
@@ -1229,6 +1833,17 @@ async function getRoomStorageUrl(roomKey) {
   return `${base}rooms/${safeKey}.md`;
 }
 
+async function getRoomLineAttributionStorageUrl(roomKey) {
+  if (!roomKey) return null;
+  if (!hyperdriveUrl) {
+    const roomUrl = await getRoomStorageUrl(roomKey);
+    if (!roomUrl) return null;
+  }
+  const base = hyperdriveUrl.endsWith("/") ? hyperdriveUrl : `${hyperdriveUrl}/`;
+  const safeKey = roomKey.replace(/[^a-z0-9]+/gi, "_");
+  return `${base}rooms/${safeKey}.line-attributions.json`;
+}
+
 async function loadRoomFromHyperdrive(roomKey) {
   try {
     const snapshot = await loadRoomSnapshotFromHyperdrive(roomKey);
@@ -1248,6 +1863,20 @@ async function loadRoomSnapshotFromHyperdrive(roomKey) {
     return { found: true, content: typeof content === "string" ? content : "" };
   } catch {
     return { found: false, content: "" };
+  }
+}
+
+async function loadRoomLineAttributionsFromHyperdrive(roomKey) {
+  try {
+    const url = await getRoomLineAttributionStorageUrl(roomKey);
+    if (!url) return {};
+    const response = await fetchWithTimeout(url, {}, 2000);
+    if (!response.ok) return {};
+    const data = await response.json();
+    const normalized = normalizeLineAttributions(data?.lineAttributions || data);
+    return normalized || {};
+  } catch {
+    return {};
   }
 }
 
@@ -1274,6 +1903,34 @@ async function saveRoomToHyperdrive(roomKey, content) {
     }
   } catch {} finally {
     hyperSaveInFlight = false;
+  }
+}
+
+async function saveRoomLineAttributionsToHyperdrive(roomKey, lineAttributions) {
+  if (lineAttributionHyperSaveInFlight) return;
+  try {
+    const url = await getRoomLineAttributionStorageUrl(roomKey);
+    if (!url) return;
+    const normalized = normalizeLineAttributions(lineAttributions) || {};
+    lineAttributionHyperSaveInFlight = true;
+    const payload = JSON.stringify({
+      roomKey,
+      lineAttributions: normalized,
+      updatedAt: Date.now()
+    });
+    const file = new File([payload], "line-attributions.json", { type: "application/json" });
+    await fetchWithTimeout(
+      url,
+      {
+        method: "PUT",
+        body: file,
+        headers: { "Content-Type": file.type || "application/json" }
+      },
+      5000
+    );
+  } catch {
+  } finally {
+    lineAttributionHyperSaveInFlight = false;
   }
 }
 
@@ -1323,6 +1980,7 @@ function normalizePeerList(peerList) {
         clientId,
         color: typeof peer.color === "string" ? peer.color : "",
         name: normalizePeerName(peer.name, fallbackName),
+        latexModeEnabled: typeof peer.latexModeEnabled === "boolean" ? peer.latexModeEnabled : null,
         isTyping: peer.isTyping === true,
         cursorLine: Number.isFinite(Number(peer.cursorLine)) ? Number(peer.cursorLine) : null,
         cursorColumn: Number.isFinite(Number(peer.cursorColumn)) ? Number(peer.cursorColumn) : null,
@@ -1343,10 +2001,23 @@ function normalizeLineAttributions(value) {
     if (!info || typeof info !== "object" || typeof info.color !== "string") continue;
     normalized[String(Math.floor(lineNum))] = {
       name: typeof info.name === "string" ? info.name : "",
-      color: info.color
+      color: info.color,
+      clientId: typeof info.clientId === "string" ? info.clientId : "",
+      updatedAt: Number.isFinite(Number(info.updatedAt)) ? Number(info.updatedAt) : 0
     };
   }
   return Object.keys(normalized).length > 0 ? normalized : null;
+}
+
+function compareLineAttributionCandidates(a, b) {
+  const aUpdatedAt = Number.isFinite(Number(a?.updatedAt)) ? Number(a.updatedAt) : 0;
+  const bUpdatedAt = Number.isFinite(Number(b?.updatedAt)) ? Number(b.updatedAt) : 0;
+  if (aUpdatedAt !== bUpdatedAt) return aUpdatedAt - bUpdatedAt;
+
+  const aClientId = typeof a?.clientId === "string" ? a.clientId : "";
+  const bClientId = typeof b?.clientId === "string" ? b.clientId : "";
+  if (aClientId === bClientId) return 0;
+  return aClientId.localeCompare(bClientId);
 }
 
 function buildPeersPageHref(key = currentRoomKey, localUrl = currentRoomUrl) {
@@ -1410,38 +2081,93 @@ function persistPeerActivitySnapshot() {
 
 function setPeerList(peerList) {
   currentPeerList = normalizePeerList(peerList);
+  // Resolve attribution conflicts deterministically per line.
+  // Imp : peer-list payloads are incremental and can be temporarily
+  // incomplete per client so never replace the whole room map from only the
+  // latest peer snapshot merge winners into the existing room map.
+  const winningAttributionsByLine = new Map();
   for (const peer of currentPeerList) {
-    if (peer?.clientId === localClientId && peer.lineAttributions && typeof peer.lineAttributions === "object") {
-      // Do not let self peerlist payload overwrite already-attributed room lines.
-      // But do allow safe name refresh on existing self-owned lines.
-      const selfSafeAttributions = {};
-      let renamedExisting = false;
-      for (const [line, info] of Object.entries(peer.lineAttributions)) {
-        const lineNum = Number(line);
-        if (!Number.isFinite(lineNum) || lineNum < 1) continue;
-        const lineKey = String(Math.floor(lineNum));
-        const existing = _roomLineAttributions[lineKey];
-        if (existing) {
-          const incomingName = typeof info?.name === "string" ? info.name.trim() : "";
-          const incomingColor = typeof info?.color === "string" ? info.color : "";
-          if (incomingName && incomingColor && existing.color === incomingColor && existing.name !== incomingName) {
-            _roomLineAttributions[lineKey] = {
-              name: incomingName,
-              color: existing.color
-            };
-            renamedExisting = true;
-          }
-          continue;
-        }
-        selfSafeAttributions[lineKey] = info;
+    if (!peer) continue;
+    const peerId = typeof peer.clientId === "string" ? peer.clientId : "";
+    const peerUpdatedAt = Number.isFinite(Number(peer.updatedAt)) ? Number(peer.updatedAt) : 0;
+    const normalizedPeerAttributions = normalizeLineAttributions(peer.lineAttributions) || {};
+    for (const [line, info] of Object.entries(normalizedPeerAttributions)) {
+      if (!info || typeof info !== "object" || typeof info.color !== "string") continue;
+      const candidate = {
+        clientId: typeof info.clientId === "string" && info.clientId ? info.clientId : peerId,
+        updatedAt: Number.isFinite(Number(info.updatedAt)) ? Number(info.updatedAt) : peerUpdatedAt,
+        name: typeof info.name === "string" ? info.name : "",
+        color: info.color
+      };
+      const existing = winningAttributionsByLine.get(line);
+      if (!existing || compareLineAttributionCandidates(candidate, existing) > 0) {
+        winningAttributionsByLine.set(line, candidate);
       }
-      mergeLineAttributionsIntoRoom(selfSafeAttributions);
-      if (renamedExisting) scheduleRoomLineAttributionsPersist();
-      continue;
     }
-    mergeLineAttributionsIntoRoom(peer.lineAttributions);
   }
+
+  // Always include the local authoritative map so recent local edits don't get
+  // temporarily dropped while peer-list propagation catches up.
+  const normalizedLocalAttributions = normalizeLineAttributions(_localLineAttributions) || {};
+  for (const [line, info] of Object.entries(normalizedLocalAttributions)) {
+    if (!info || typeof info !== "object" || typeof info.color !== "string") continue;
+    const candidate = {
+      clientId: typeof info.clientId === "string" && info.clientId ? info.clientId : localClientId,
+      updatedAt: Number.isFinite(Number(info.updatedAt)) ? Number(info.updatedAt) : 0,
+      name: typeof info.name === "string" ? info.name : "",
+      color: info.color
+    };
+    const existing = winningAttributionsByLine.get(line);
+    if (!existing || compareLineAttributionCandidates(candidate, existing) > 0) {
+      winningAttributionsByLine.set(line, candidate);
+    }
+  }
+
+  const mergedRoomAttributions = normalizeLineAttributions(_roomLineAttributions) || {};
+  let roomChanged = false;
+  const sortedWinningLines = Array.from(winningAttributionsByLine.keys()).sort((a, b) => Number(a) - Number(b));
+  for (const lineKey of sortedWinningLines) {
+    const winner = winningAttributionsByLine.get(lineKey);
+    const nextValue = {
+      name: winner?.name || "",
+      color: winner?.color || "",
+      clientId: winner?.clientId || "",
+      updatedAt: Number.isFinite(Number(winner?.updatedAt)) ? Number(winner.updatedAt) : 0
+    };
+    const prevValue = mergedRoomAttributions[lineKey];
+    const shouldReplace =
+      !prevValue ||
+      compareLineAttributionCandidates(nextValue, prevValue) >= 0 ||
+      prevValue.name !== nextValue.name ||
+      prevValue.color !== nextValue.color;
+    if (!shouldReplace) continue;
+    if (
+      !prevValue ||
+      prevValue.name !== nextValue.name ||
+      prevValue.color !== nextValue.color ||
+      (prevValue.clientId || "") !== (nextValue.clientId || "") ||
+      Number(prevValue.updatedAt || 0) !== Number(nextValue.updatedAt || 0)
+    ) {
+      mergedRoomAttributions[lineKey] = nextValue;
+      roomChanged = true;
+    }
+  }
+
+  if (roomChanged) {
+    const roomDiff = diffLineAttributionMaps(_roomLineAttributions, mergedRoomAttributions);
+    _roomLineAttributions = mergedRoomAttributions;
+    if (roomDiff.addedCount || roomDiff.removedCount || roomDiff.changedCount) {
+      scheduleRoomLineAttributionsPersist();
+    }
+  }
+
   refreshRoomAttributionNamesFromPeerList();
+  const hostWithLatexMode = currentPeerList.find(
+    (peer) => peer?.role === "host" && typeof peer.latexModeEnabled === "boolean"
+  );
+  if (hostWithLatexMode) {
+    syncLatexModeFromRoomOnce(hostWithLatexMode.latexModeEnabled);
+  }
   persistPeerStatusSnapshot();
   if (peersCount.textContent === "0") {
     let estimatedRemote = currentPeerList.length;
@@ -1564,6 +2290,9 @@ function connectSseChannel(localUrl, role) {
       if (ydoc) return;
       try {
         const data = JSON.parse(event.data || "{}");
+        if (typeof data.latexModeEnabled === "boolean") {
+          syncLatexModeFromRoomOnce(data.latexModeEnabled);
+        }
         const incoming = typeof data.content === "string" ? data.content : "";
         if (incoming === markdownInput.value) return;
         const isFocused = document.activeElement === markdownInput;
@@ -1647,11 +2376,23 @@ function connectSseChannel(localUrl, role) {
 async function connectToRoom(localUrl, role = "client") {
   currentRoomUrl = localUrl;
   currentRole = normalizePeerRole(role || "client");
-  // Keep local ownership map in-memory only for the active session.
-  // Reloading stale line-number ownership from storage can overwrite peer traces after reconnect.
-  _localLineAttributions = {};
+  hasSyncedLatexModeFromRoom = false;
+  const cachedRoomLineAttributions = readRoomLineAttributions(currentRoomKey);
+  let restoredRoomLineAttributions = cachedRoomLineAttributions;
+  if (
+    currentRoomKey &&
+    (!restoredRoomLineAttributions || Object.keys(restoredRoomLineAttributions).length === 0)
+  ) {
+    const remoteLineAttributions = await loadRoomLineAttributionsFromHyperdrive(currentRoomKey);
+    if (remoteLineAttributions && Object.keys(remoteLineAttributions).length > 0) {
+      restoredRoomLineAttributions = remoteLineAttributions;
+    }
+  }
+  _roomLineAttributions = restoredRoomLineAttributions || {};
+
+  _localLineAttributions = filterLineAttributionsByClientId(_roomLineAttributions, localClientId);
   clearLocalLineAttributions(currentRoomKey);
-  _roomLineAttributions = readRoomLineAttributions(currentRoomKey);
+  persistRoomLineAttributionsNow();
   updateLineAuthors(_roomLineAttributions);
   currentPeerList = [];
   peerActivityLog = [];
@@ -1779,6 +2520,17 @@ async function connectToRoom(localUrl, role = "client") {
   if (window.Y) {
     ydoc = new window.Y.Doc();
     ytext = ydoc.getText("content");
+    ysettings = ydoc.getMap(ROOM_SETTINGS_MAP_NAME);
+    ysettingsObserver = (_event, transaction) => {
+      if (transaction.local) return;
+      const sharedLatexMode = ysettings.get(ROOM_SETTINGS_LATEX_MODE_KEY);
+      syncLatexModeFromRoomOnce(sharedLatexMode);
+      if (hasSyncedLatexModeFromRoom && ysettings && ysettingsObserver) {
+        ysettings.unobserve(ysettingsObserver);
+        ysettingsObserver = null;
+      }
+    };
+    ysettings.observe(ysettingsObserver);
 
     if (yjsStateBase64) {
       try {
@@ -1834,10 +2586,47 @@ async function connectToRoom(localUrl, role = "client") {
       }
     }
 
+    const sharedLatexMode = ysettings.get(ROOM_SETTINGS_LATEX_MODE_KEY);
+    if (currentRole === "host") {
+      publishLatexModeToRoomSettings(getLocalLatexMode());
+    } else if (typeof sharedLatexMode === "boolean") {
+      syncLatexModeFromRoomOnce(sharedLatexMode);
+      if (hasSyncedLatexModeFromRoom && ysettings && ysettingsObserver) {
+        ysettings.unobserve(ysettingsObserver);
+        ysettingsObserver = null;
+      }
+    }
+
     savedYjsState = null;
 
     ytext.observe((event) => {
       const newContent = ytext.toString();
+      const oldContent = prevText;
+      const delta = Array.from(event.changes.delta);
+      const beforeRoomMap = _roomLineAttributions;
+      const beforeLocalMap = _localLineAttributions;
+      const origin = event?.transaction?.origin;
+
+      if (origin !== Y_ORIGIN_LOCAL) {
+        const shiftedRoom = shiftLineAttributionsByDelta(beforeRoomMap, oldContent, delta);
+        const shiftedLocal = shiftLineAttributionsByDelta(beforeLocalMap, oldContent, delta);
+        if (shiftedRoom.changed) {
+          _roomLineAttributions = shiftedRoom.map;
+        }
+        if (shiftedLocal.changed) {
+          _localLineAttributions = shiftedLocal.map;
+        }
+        if (shiftedRoom.changed || shiftedLocal.changed) {
+          scheduleRoomLineAttributionsPersist();
+          updateLineAuthors(_roomLineAttributions);
+          // Remote edits can shift this peer's authored line numbers; publish the
+          // shifted local attribution map immediately so other peers don't lag.
+          if (shiftedLocal.changed) {
+            schedulePresenceSend(true);
+          }
+        }
+      }
+
       // Keep baseline aligned to authoritative CRDT text
       prevText = newContent;
       if (newContent === markdownInput.value) return;
@@ -1846,7 +2635,7 @@ async function connectToRoom(localUrl, role = "client") {
       let s = markdownInput.selectionStart ?? 0;
       let e = markdownInput.selectionEnd ?? 0;
       let pos = 0;
-      for (const d of event.changes.delta) {
+      for (const d of delta) {
         if (d.retain) {
           pos += d.retain;
         } else if (d.insert) {
@@ -1866,10 +2655,14 @@ async function connectToRoom(localUrl, role = "client") {
         Math.max(0, Math.min(s, newContent.length)),
         Math.max(0, Math.min(e, newContent.length))
       );
+      // Remote text applies do not fire input events; force gutter refresh so
+      // previously-merged attribution lines are re-laid out against new content.
+      updateLineAuthors(_roomLineAttributions);
       renderPreview();
       scheduleDraftSave();
     });
   } else {
+    ysettings = null;
     console.error("[p2pmd] Yjs failed to load; collaborative sync is unavailable.");
   }
 
@@ -2253,24 +3046,30 @@ async function getOrCreateHyperdrive() {
   return hyperdriveUrl;
 }
 
-function buildPublishHtml(markdown) {
-  const rendered = renderMarkdown(markdown || "");
+async function buildPublishHtml(markdown) {
+  const useIEEE = window.latexModeEnabled && window.ieeeModeEnabled;
+  const rendered = renderDocument(markdown || "", { ieeeLayout: useIEEE });
+  const katexCSS = await loadKatexCSS();
   const footer = `<footer class="p2pmd-footer">Made by <a href="https://github.com/p2plabsxyz/p2pmd" target="_blank" rel="noopener noreferrer">p2pmd</a> and published with <a href="https://peersky.p2plabs.xyz/" target="_blank" rel="noopener noreferrer">PeerSky</a>.</footer>`;
+  const bodyContent = useIEEE ? `<article class="ieee-paper-shell">${rendered}</article>` : rendered;
+  const pageFooter = useIEEE ? "" : footer;
   return `<!DOCTYPE html>
 <html lang="en" style="background:#ffffff;color:#111111">
 <head>
   <meta charset="utf-8">
   <title>p2pmd document</title>
+  <style>${katexCSS}</style>
   <style>${publishCSS}</style>
+  ${useIEEE ? `<style>${ieeePaperCSS}</style>` : ''}
 </head>
-<body style="background:#ffffff;color:#111111">
-  ${rendered}
-  ${footer}
+<body style="background:#ffffff;color:#111111"${useIEEE ? ' class="ieee-paper"' : ''}>
+  ${bodyContent}
+  ${pageFooter}
 </body>
 </html>`;
 }
 
-function buildSlidesHtml(markdown) {
+async function buildSlidesHtml(markdown) {
   // Match slide delimiters: --- surrounded by blank lines OR <!-- slide --> comment
   const slideDelimiters = /\n\n---\n\n|^---\n\n|\n\n---$|^<!-- slide -->$/gm;
   const slides = markdown.split(slideDelimiters)
@@ -2282,12 +3081,15 @@ function buildSlidesHtml(markdown) {
     return `<div class="slide${index === 0 ? ' active' : ''}">${rendered}</div>`;
   }).join('\n');
 
+  const katexCSS = await loadKatexCSS();
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Presentation Slides</title>
+  <style>${katexCSS}</style>
   <style>
     @font-face {
       font-family: 'FontWithASyntaxHighlighter';
@@ -2426,18 +3228,18 @@ function triggerDownload(blob, filename) {
   URL.revokeObjectURL(url);
 }
 
-function exportAsHtml() {
+async function exportAsHtml() {
   const markdown = markdownInput.value;
-  const html = isSlideMode ? buildSlidesHtml(markdown) : buildPublishHtml(markdown);
+  const html = isSlideMode ? await buildSlidesHtml(markdown) : await buildPublishHtml(markdown);
   const fileName = getExportFileName("html");
   const blob = new Blob([html], { type: "text/html" });
   triggerDownload(blob, fileName);
   if (exportMenu?.open) exportMenu.open = false;
 }
 
-function exportAsSlides() {
+async function exportAsSlides() {
   const markdown = markdownInput.value;
-  const slidesHtml = buildSlidesHtml(markdown);
+  const slidesHtml = await buildSlidesHtml(markdown);
   const fileName = getExportFileName("slides.html");
   const blob = new Blob([slidesHtml], { type: "text/html" });
   triggerDownload(blob, fileName);
@@ -2448,8 +3250,15 @@ let currentSlideIndex = 0;
 let slidesData = [];
 let isSlideMode = false;
 
+function clampSlideIndex(index, totalSlides) {
+  if (!Number.isFinite(index) || totalSlides <= 0) return 0;
+  return Math.max(0, Math.min(Math.floor(index), totalSlides - 1));
+}
+
 function autoRenderSlides() {
   const markdown = markdownInput.value;
+  const previousSlideIndex = currentSlideIndex;
+  const cursorSlideIndex = getCursorSlideIndex();
   // Match slide delimiters: --- surrounded by blank lines OR <!-- slide --> comment
   const slideDelimiters = /\n\n---\n\n|^---\n\n|\n\n---$|^<!-- slide -->$/gm;
   slidesData = markdown.split(slideDelimiters)
@@ -2460,7 +3269,10 @@ function autoRenderSlides() {
   
   isSlideMode = true;
   window.isSlideMode = true;
-  currentSlideIndex = 0;
+  currentSlideIndex = clampSlideIndex(previousSlideIndex, slidesData.length);
+  if (document.activeElement === markdownInput) {
+    currentSlideIndex = clampSlideIndex(cursorSlideIndex, slidesData.length);
+  }
   
   markdownPreview.classList.add('hidden');
   slidesPreview.classList.remove('hidden');
@@ -2526,7 +3338,7 @@ function renderInlineSlides() {
       <div id="slides-counter"></div>
     </div>
     <div class="slides-footer">
-      Made by <a href="https://github.com/p2plabsxyz/peersky-browser/tree/main/src/pages/p2p/p2pmd" target="_blank" rel="noopener noreferrer">p2pmd</a> with <a href="https://peersky.xyz" target="_blank" rel="noopener noreferrer">PeerSky</a>
+      Made by <a href="https://github.com/p2plabsxyz/peersky-test/tree/main/src/pages/p2p/p2pmd" target="_blank" rel="noopener noreferrer">p2pmd</a> with <a href="https://peersky.xyz" target="_blank" rel="noopener noreferrer">PeerSky</a>
     </div>
   `;
   
@@ -2651,9 +3463,9 @@ function getCursorSlideIndex() {
   return matches ? matches.length : 0;
 }
 
-function openFullPreview() {
+async function openFullPreview() {
   const markdown = markdownInput.value;
-  const slidesHtml = buildSlidesHtml(markdown);
+  const slidesHtml = await buildSlidesHtml(markdown);
   const blob = new Blob([slidesHtml], { type: "text/html" });
   const url = URL.createObjectURL(blob);
   const slidesWindow = window.open(url, "_blank");
@@ -2662,8 +3474,8 @@ function openFullPreview() {
   }
 }
 
-function exportToPdf() {
-  const html = buildPublishHtml(markdownInput.value);
+async function exportToPdf() {
+  const html = await buildPublishHtml(markdownInput.value);
   const fileName = getExportFileName("pdf");
   if (window.peersky?.printToPdf) {
     window.peersky.printToPdf(html, fileName).finally(() => {
@@ -2787,6 +3599,15 @@ function addPublishError(name, text) {
   publishList.appendChild(listItem);
 }
 
+function ipfsToGatewayUrl(ipfsUrl) {
+  if (typeof ipfsUrl !== "string") return "";
+  const match = ipfsUrl.match(/^ipfs:\/\/([^/?#]+)(\/[^?#]*)?(\?[^#]*)?(#.*)?$/i);
+  if (!match) return ipfsUrl;
+
+  const [, cid] = match;
+  return `https://${cid}.ipfs.dweb.link/`;
+}
+
 async function publishDocument() {
   const markdown = markdownInput.value;
   if (!markdown.trim()) {
@@ -2797,7 +3618,7 @@ async function publishDocument() {
   const slideDelimiters = /^---$|^<!-- slide -->$/gm;
   const hasSlides = slideDelimiters.test(markdown);
   const useSlides = isSlideMode && hasSlides;
-  const html = useSlides ? buildSlidesHtml(markdown) : buildPublishHtml(markdown);
+  const html = useSlides ? await buildSlidesHtml(markdown) : await buildPublishHtml(markdown);
   let fileName = "index.html";
   if (protocol === "hyper") {
     const title = titleInput.value.trim();
@@ -2847,7 +3668,8 @@ async function uploadFile(file) {
 
     const finalUrl = protocol === "hyper" ? url : response.headers.get("Location");
     if (finalUrl) {
-      addPublishUrl(finalUrl);
+      const publishUrl = protocol === "https" ? ipfsToGatewayUrl(finalUrl) : finalUrl;
+      addPublishUrl(publishUrl);
     }
   } catch (error) {
     console.error(`[uploadFile] Error uploading ${file.name}:`, error);
@@ -2876,6 +3698,35 @@ function extractMarkdownFromSlidesHtml(html) {
   return slideContents.join('\n\n---\n\n');
 }
 
+function nodeToMarkdownMath(node, inlinePreferred = false) {
+  if (!node || node.nodeType !== Node.ELEMENT_NODE) return null;
+  const texSource = node.getAttribute("data-tex-source");
+  let resolvedTex = typeof texSource === "string" ? texSource : null;
+  let isBlock = node.classList.contains("katex-block");
+
+  if (!resolvedTex && node.tagName.toLowerCase() === "annotation" && node.getAttribute("encoding") === "application/x-tex") {
+    resolvedTex = node.textContent || "";
+  }
+
+  if (!resolvedTex && (node.classList.contains("katex") || node.classList.contains("katex-display"))) {
+    const annotation = node.querySelector('annotation[encoding="application/x-tex"]');
+    if (annotation && annotation.textContent) {
+      resolvedTex = annotation.textContent;
+      if (node.classList.contains("katex-display")) isBlock = true;
+    }
+  }
+
+  if (!resolvedTex) return null;
+
+  if (isBlock) {
+    return `$$\n${resolvedTex}\n$$`;
+  }
+  if (inlinePreferred) {
+    return `$${resolvedTex}$`;
+  }
+  return `$$\n${resolvedTex}\n$$`;
+}
+
 function htmlToMarkdownContent(element) {
   let result = "";
   
@@ -2890,6 +3741,15 @@ function htmlToMarkdownContent(element) {
         result += `<!-- ${comment} -->\n\n`;
       }
     } else if (node.nodeType === Node.ELEMENT_NODE) {
+      const mathMarkdown = nodeToMarkdownMath(node, true);
+      if (mathMarkdown) {
+        if (mathMarkdown.startsWith("$$")) {
+          result += `${mathMarkdown}\n\n`;
+        } else {
+          result += mathMarkdown;
+        }
+        continue;
+      }
       const tag = node.tagName.toLowerCase();
       
       switch (tag) {
@@ -2992,6 +3852,11 @@ function extractInlineContent(element) {
     if (node.nodeType === Node.TEXT_NODE) {
       result += node.textContent;
     } else if (node.nodeType === Node.ELEMENT_NODE) {
+      const mathMarkdown = nodeToMarkdownMath(node, true);
+      if (mathMarkdown) {
+        result += mathMarkdown;
+        continue;
+      }
       const tag = node.tagName.toLowerCase();
       
       switch (tag) {
@@ -3053,6 +3918,15 @@ function extractMarkdownFromHtml(html) {
       if (node.nodeType === Node.TEXT_NODE) {
         result += node.textContent;
       } else if (node.nodeType === Node.ELEMENT_NODE) {
+        const mathMarkdown = nodeToMarkdownMath(node, true);
+        if (mathMarkdown) {
+          if (mathMarkdown.startsWith("$$")) {
+            result += `${mathMarkdown}\n\n`;
+          } else {
+            result += mathMarkdown;
+          }
+          continue;
+        }
         const tag = node.tagName.toLowerCase();
         
         switch (tag) {
@@ -3363,10 +4237,16 @@ markdownInput.addEventListener("paste", (event) => {
   const text = markdownInput.value || "";
   const offset = Number.isFinite(markdownInput.selectionStart) ? markdownInput.selectionStart : 0;
   const before = text.slice(0, Math.min(offset, text.length));
+  const insertionAtLineStart = isOffsetAtLineStart(text, offset);
+  const startsWithNewline = pastedText.startsWith("\n");
+  const endsWithNewline = pastedText.endsWith("\n");
   let startLine = 1;
   for (const ch of before) if (ch === "\n") startLine += 1;
+  if (!insertionAtLineStart && startsWithNewline) startLine += 1;
 
-  const pastedLineCount = (pastedText.match(/\n/g) || []).length + 1;
+  let pastedLineCount = countLineBreaks(pastedText) + (endsWithNewline ? 0 : 1);
+  if (!insertionAtLineStart && startsWithNewline) pastedLineCount -= 1;
+  pastedLineCount = Math.max(1, pastedLineCount);
   const endLine = startLine + pastedLineCount - 1;
 
   setTimeout(() => {
@@ -3397,6 +4277,15 @@ markdownInput.addEventListener("focus", () => {
 
 markdownInput.addEventListener("blur", () => {
   isLocalTyping = false;
+  schedulePresenceSend(true);
+});
+
+window.addEventListener(LATEX_MODE_SYNC_EVENT, (event) => {
+  const enabled = event?.detail?.enabled;
+  if (typeof enabled !== "boolean") return;
+  if (currentRole === "host") {
+    publishLatexModeToRoomSettings(enabled);
+  }
   schedulePresenceSend(true);
 });
 
@@ -3516,6 +4405,7 @@ exportPdfButton.addEventListener("click", exportToPdf);
 exportSlidesButton.addEventListener("click", exportAsSlides);
 window.autoRenderSlides = autoRenderSlides;
 window.exitSlideMode = exitSlideMode;
+window.attributeLocalLineRange = attributeLocalLineRange;
 window.isSlideMode = false;
 
 Object.defineProperty(window, 'isSlideMode', {
