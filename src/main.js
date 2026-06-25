@@ -326,6 +326,7 @@ app.whenReady().then(async () => {
 // Introduce a flag to prevent multiple 'before-quit' handling
 let isQuitting = false
 const SHUTDOWN_TIMEOUT_MS = 8000
+const FORCE_QUIT_TIMEOUT_MS = 15000
 
 function withTimeout (promise, ms, label) {
   return Promise.race([
@@ -340,13 +341,24 @@ app.on('before-quit', async (event) => {
   if (isQuitting) {
     return
   }
-  event.preventDefault() // Prevent the default quit behavior
+  event.preventDefault() // Defer the quit so we can shut p2p services down cleanly.
 
   log.info('Before quit: Saving window states...')
 
   isQuitting = true // Set the quitting flag
 
   windowManager.setQuitting(true) // Inform WindowManager that quitting is happening
+
+  // Absolute watchdog: p2p services (libp2p / hyperswarm / holesail) hold native
+  // handles that can keep the process alive even after app.quit(), and Electron
+  // stops pumping JS timers once a graceful quit begins. Schedule the hard exit
+  // now, while the loop is still healthy, so the process is guaranteed to die
+  // (this is what lets Squirrel/electron-updater's installer swap the bundle).
+  const forceQuit = setTimeout(() => {
+    log.warn('[quit] Shutdown watchdog fired — force-exiting')
+    app.exit(0)
+  }, FORCE_QUIT_TIMEOUT_MS)
+  forceQuit.unref?.()
 
   // Shutdown BitTorrent — save state and kill worker before process exits
   try {
@@ -372,7 +384,12 @@ app.on('before-quit', async (event) => {
   }
 
   windowManager.stopSaver()
-  app.quit()
+  clearTimeout(forceQuit)
+  // Hard exit instead of app.quit(): app.quit() re-enters before-quit and waits
+  // on graceful window close, which deadlocks against window-manager's close
+  // guard and leaves a stuck process in the dock. app.exit() terminates now.
+  log.info('[quit] Shutdown complete — exiting')
+  app.exit(0)
 })
 
 async function setupProtocols (session) {
