@@ -341,6 +341,12 @@ app.on('before-quit', async (event) => {
   if (isQuitting) {
     return
   }
+
+  if (app.isQuittingForUpdate) {
+    log.info('[quit] Update install — exiting immediately')
+    process.exit(0)
+  }
+
   event.preventDefault() // Defer the quit so we can shut p2p services down cleanly.
 
   log.info('Before quit: Saving window states...')
@@ -356,7 +362,7 @@ app.on('before-quit', async (event) => {
   // (this is what lets Squirrel/electron-updater's installer swap the bundle).
   const forceQuit = setTimeout(() => {
     log.warn('[quit] Shutdown watchdog fired — force-exiting')
-    app.exit(0)
+    process.exit(0)
   }, FORCE_QUIT_TIMEOUT_MS)
   forceQuit.unref?.()
 
@@ -384,12 +390,8 @@ app.on('before-quit', async (event) => {
   }
 
   windowManager.stopSaver()
-  clearTimeout(forceQuit)
-  // Hard exit instead of app.quit(): app.quit() re-enters before-quit and waits
-  // on graceful window close, which deadlocks against window-manager's close
-  // guard and leaves a stuck process in the dock. app.exit() terminates now.
   log.info('[quit] Shutdown complete — exiting')
-  app.exit(0)
+  process.exit(0)
 })
 
 async function setupProtocols (session) {
