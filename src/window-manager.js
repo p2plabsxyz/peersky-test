@@ -83,6 +83,9 @@ class WindowManager {
     }
 
     app.on('before-quit', (event) => {
+      if (app.isQuittingForUpdate) {
+        return
+      }
       // Avoid re-entering if something calls app.quit() again
       if (this.shutdownInProgress) {
         log.info('before-quit: shutdown already in progress, ignoring.')
