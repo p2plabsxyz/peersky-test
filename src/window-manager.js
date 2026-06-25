@@ -83,6 +83,8 @@ class WindowManager {
     }
 
     app.on('before-quit', (event) => {
+      // Updates save + exit in main.js. Skip this handler's app.exit(0), which
+      // hangs on p2p native handles and leaves the app stuck in the dock.
       if (app.isQuittingForUpdate) {
         return
       }

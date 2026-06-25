@@ -14,26 +14,29 @@ function getFeedUrl () {
   return `${UPDATE_HOST}/${UPDATE_REPO}/${process.platform}-${process.arch}${formatSegment}/${app.getVersion()}`
 }
 
-// Prompt the user once an update is staged. Returns true if they chose to
-// restart immediately.
+// Returns true if the user chose to restart now.
 function promptRestart (releaseName) {
   const response = dialog.showMessageBoxSync({
     type: 'info',
     buttons: ['Restart Now', 'Later'],
     title: 'Update Ready',
     message: releaseName || 'A new version is ready',
-    detail: 'Restart now to install the update, or choose Later to postpone.'
+    detail: 'Restart now to install the latest update, or choose Later to postpone. Restart may take a few minutes depending on download size. Do not close the browser — it will restart on its own.'
   })
   return response === 0
 }
 
+// SIGKILL can't be blocked, so the process dies even when p2p native modules
+// hang process.exit (which used to leave the app stuck in the dock on macOS).
+function forceKill () {
+  log.warn('[auto-updater] before-quit did not fire; force-killing')
+  process.kill(process.pid, 'SIGKILL')
+}
+
 function installUpdateAndQuit (quitFn) {
   app.isQuittingForUpdate = true
-  const hardExit = setTimeout(() => {
-    log.warn('[auto-updater] Hard exit for update install')
-    process.exit(0)
-  }, FORCE_EXIT_TIMEOUT_MS)
-  hardExit.unref?.()
+  // Backup if before-quit never fires; unref'd so it can't keep the app alive.
+  setTimeout(forceKill, FORCE_EXIT_TIMEOUT_MS).unref?.()
   quitFn()
 }
 
@@ -46,15 +49,14 @@ function scheduleChecks (check) {
   }, STARTUP_DELAY_MS)
 }
 
-// macOS uses Electron's native autoUpdater (Squirrel.Mac) against
-// update.electronjs.org. Squirrel.Mac relies on native OS networking, which
-// avoids the c-ares DNS crash that electron-updater triggers on macOS.
+// macOS uses the native autoUpdater (Squirrel.Mac). It relies on native OS
+// networking, which avoids the c-ares DNS crash electron-updater hits on macOS.
 function setupMacUpdater () {
   const feedURL = getFeedUrl()
   log.info('[auto-updater] feedURL', feedURL)
 
-  // update.electronjs.org returns JSON (or HTTP 204 when up to date),
-  // so Squirrel must be told serverType: 'json' or it fails to parse the response.
+  // update.electronjs.org returns JSON (204 when up to date); Squirrel needs
+  // serverType: 'json' to parse it.
   nativeUpdater.setFeedURL({
     url: feedURL,
     serverType: 'json',
@@ -91,8 +93,7 @@ function setupMacUpdater () {
   })
 
   scheduleChecks(() => {
-    // Native autoUpdater.checkForUpdates() returns void (not a Promise),
-    // so guard with try/catch rather than .catch().
+    // Native checkForUpdates() returns void, so guard with try/catch.
     try {
       nativeUpdater.checkForUpdates()
     } catch (err) {
@@ -101,11 +102,8 @@ function setupMacUpdater () {
   })
 }
 
-// Windows ships NSIS installers, which the native autoUpdater (Squirrel.Windows)
-// cannot consume. electron-updater reads the GitHub publish config from the
-// generated app-update.yml and handles NSIS download + install. electronUpdater
-// .autoUpdater is a lazy getter, so the platform updater is only instantiated
-// here on Windows and never on macOS (where it would risk the c-ares crash).
+// Windows ships NSIS installers, which the native autoUpdater can't consume.
+// electron-updater reads app-update.yml and handles the NSIS download + install.
 function setupWindowsUpdater () {
   const { autoUpdater } = electronUpdater
   autoUpdater.logger = log
@@ -145,6 +143,22 @@ function setupWindowsUpdater () {
       log.error('[auto-updater] checkForUpdates failed:', err?.message || err)
     })
   })
+}
+
+// Dev-only: run the popup -> quit -> relaunch path without a build or real
+// update, via `PEERSKY_TEST_UPDATE=1 npm start`. app.relaunch() starts a fresh
+// instance once this one exits.
+function simulateUpdatePopupForDev () {
+  setTimeout(() => {
+    log.info('[auto-updater] (dev) Simulating update-downloaded popup')
+    if (promptRestart(`Dev Update Simulation (v${app.getVersion()})`)) {
+      log.info('[auto-updater] (dev) Restart chosen — relaunching to verify quit path')
+      app.relaunch()
+      installUpdateAndQuit(() => app.quit())
+    } else {
+      log.info('[auto-updater] (dev) Restart postponed')
+    }
+  }, 3000)
 }
 
 function setupAutoUpdater () {

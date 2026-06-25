@@ -343,8 +343,13 @@ app.on('before-quit', async (event) => {
   }
 
   if (app.isQuittingForUpdate) {
-    log.info('[quit] Update install — exiting immediately')
-    process.exit(0)
+    log.info('[quit] Update install — saving session, then exiting')
+    event.preventDefault()
+    // Save fast, then SIGKILL. process.exit hangs on p2p native handles.
+    windowManager.saveCompleteState()
+      .catch((err) => log.error('[quit] update save failed:', err?.message || err))
+      .finally(() => process.kill(process.pid, 'SIGKILL'))
+    return
   }
 
   event.preventDefault() // Defer the quit so we can shut p2p services down cleanly.
