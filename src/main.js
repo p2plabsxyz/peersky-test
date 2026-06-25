@@ -319,8 +319,14 @@ app.whenReady().then(async () => {
     ])
   }
 
-  // Initialize AutoUpdater after windowManager is ready
-  setupAutoUpdater()
+  // Initialize AutoUpdater after windowManager is ready. The callback saves the
+  // session before the updater quits; setQuitting(true) also stops the save from
+  // wiping the restore file if a window is already gone.
+  setupAutoUpdater(async () => {
+    windowManager.setQuitting(true)
+    windowManager.stopSaver()
+    await windowManager.saveCompleteState()
+  })
 })
 
 // Introduce a flag to prevent multiple 'before-quit' handling
@@ -343,12 +349,10 @@ app.on('before-quit', async (event) => {
   }
 
   if (app.isQuittingForUpdate) {
-    log.info('[quit] Update install — saving session, then exiting')
-    event.preventDefault()
-    // Save fast, then SIGKILL. process.exit hangs on p2p native handles.
-    windowManager.saveCompleteState()
-      .catch((err) => log.error('[quit] update save failed:', err?.message || err))
-      .finally(() => process.kill(process.pid, 'SIGKILL'))
+    // Session was already saved before quitAndInstall. SIGKILL now, since
+    // process.exit hangs on p2p native handles.
+    log.info('[quit] Update install — exiting')
+    process.kill(process.pid, 'SIGKILL')
     return
   }
 

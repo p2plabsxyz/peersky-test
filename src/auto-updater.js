@@ -33,8 +33,15 @@ function forceKill () {
   process.kill(process.pid, 'SIGKILL')
 }
 
-function installUpdateAndQuit (quitFn) {
+// Save the session before quitting: quitAndInstall destroys windows, and a save
+// that races it can wipe the restore file, so we persist while windows are alive.
+async function installUpdateAndQuit (quitFn, saveSession) {
   app.isQuittingForUpdate = true
+  try {
+    await saveSession?.()
+  } catch (err) {
+    log.error('[auto-updater] session save failed:', err?.message || err)
+  }
   // Backup if before-quit never fires; unref'd so it can't keep the app alive.
   setTimeout(forceKill, FORCE_EXIT_TIMEOUT_MS).unref?.()
   quitFn()
@@ -51,7 +58,7 @@ function scheduleChecks (check) {
 
 // macOS uses the native autoUpdater (Squirrel.Mac). It relies on native OS
 // networking, which avoids the c-ares DNS crash electron-updater hits on macOS.
-function setupMacUpdater () {
+function setupMacUpdater (saveSession) {
   const feedURL = getFeedUrl()
   log.info('[auto-updater] feedURL', feedURL)
 
@@ -81,10 +88,10 @@ function setupMacUpdater () {
     log.info(`[auto-updater] download ${progress.percent?.toFixed(1) ?? 0}%`)
   })
 
-  nativeUpdater.on('update-downloaded', (_event, releaseNotes, releaseName) => {
+  nativeUpdater.on('update-downloaded', async (_event, releaseNotes, releaseName) => {
     log.info('[auto-updater] update-downloaded:', releaseName || releaseNotes)
     if (promptRestart(releaseName || releaseNotes)) {
-      installUpdateAndQuit(() => nativeUpdater.quitAndInstall())
+      await installUpdateAndQuit(() => nativeUpdater.quitAndInstall(), saveSession)
     }
   })
 
@@ -102,9 +109,10 @@ function setupMacUpdater () {
   })
 }
 
-// Windows ships NSIS installers, which the native autoUpdater can't consume.
-// electron-updater reads app-update.yml and handles the NSIS download + install.
-function setupWindowsUpdater () {
+// Shared electron-updater path for Windows (NSIS) and Linux (AppImage); the
+// native autoUpdater can't consume either. electron-updater reads app-update.yml
+// plus the platform's latest-*.yml and handles the download + install.
+function setupElectronUpdater (saveSession) {
   const { autoUpdater } = electronUpdater
   autoUpdater.logger = log
   autoUpdater.autoDownload = true
@@ -126,10 +134,10 @@ function setupWindowsUpdater () {
     log.info(`[auto-updater] download ${progress?.percent?.toFixed(1) ?? 0}%`)
   })
 
-  autoUpdater.on('update-downloaded', (info) => {
+  autoUpdater.on('update-downloaded', async (info) => {
     log.info('[auto-updater] update-downloaded:', info?.version)
     if (promptRestart(info?.releaseName || info?.version)) {
-      installUpdateAndQuit(() => autoUpdater.quitAndInstall())
+      await installUpdateAndQuit(() => autoUpdater.quitAndInstall(), saveSession)
     }
   })
 
@@ -148,33 +156,28 @@ function setupWindowsUpdater () {
 // Dev-only: run the popup -> quit -> relaunch path without a build or real
 // update, via `PEERSKY_TEST_UPDATE=1 npm start`. app.relaunch() starts a fresh
 // instance once this one exits.
-function simulateUpdatePopupForDev () {
-  setTimeout(() => {
+function simulateUpdatePopupForDev (saveSession) {
+  setTimeout(async () => {
     log.info('[auto-updater] (dev) Simulating update-downloaded popup')
     if (promptRestart(`Dev Update Simulation (v${app.getVersion()})`)) {
       log.info('[auto-updater] (dev) Restart chosen — relaunching to verify quit path')
       app.relaunch()
-      installUpdateAndQuit(() => app.quit())
+      await installUpdateAndQuit(() => app.quit(), saveSession)
     } else {
       log.info('[auto-updater] (dev) Restart postponed')
     }
   }, 3000)
 }
 
-function setupAutoUpdater () {
+function setupAutoUpdater (saveSession) {
   if (!app.isPackaged) {
     if (process.env.PEERSKY_TEST_UPDATE) {
       log.info('[auto-updater] Dev mode: PEERSKY_TEST_UPDATE set — simulating the update popup.')
-      simulateUpdatePopupForDev()
+      simulateUpdatePopupForDev(saveSession)
       return
     }
     log.info('[auto-updater] Dev mode: auto-update checks run only in packaged ' +
       'builds (1h interval after a 10s delay). Set PEERSKY_TEST_UPDATE=1 to preview the popup.')
-    return
-  }
-
-  if (process.platform === 'linux') {
-    log.info('[auto-updater] Skipping: Linux is handled by AppImage / distro packaging')
     return
   }
 
@@ -187,14 +190,32 @@ function setupAutoUpdater () {
 
   if (process.platform === 'win32') {
     try {
-      setupWindowsUpdater()
+      setupElectronUpdater(saveSession)
     } catch (err) {
       log.error('[auto-updater] Windows updater init failed:', err?.message || err)
     }
     return
   }
 
-  setupMacUpdater()
+  if (process.platform === 'linux') {
+    // Only the AppImage build can auto-update: electron-updater swaps the running
+    // .AppImage in place. The deb/rpm/pacman/apk builds are owned by the system
+    // package manager, so they have no in-app update path — those users update
+    // through their distro. process.env.APPIMAGE is set only when running as an
+    // AppImage, which is how we tell the builds apart.
+    if (!process.env.APPIMAGE) {
+      log.info('[auto-updater] Skipping: Linux non-AppImage build updates via the system package manager')
+      return
+    }
+    try {
+      setupElectronUpdater(saveSession)
+    } catch (err) {
+      log.error('[auto-updater] Linux (AppImage) updater init failed:', err?.message || err)
+    }
+    return
+  }
+
+  setupMacUpdater(saveSession)
 }
 
 export { setupAutoUpdater }

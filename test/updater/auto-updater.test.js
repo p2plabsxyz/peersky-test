@@ -16,6 +16,20 @@ function withPlatform (platform, fn) {
   }
 }
 
+// process.env.APPIMAGE is the signal electron uses for "running as an AppImage".
+// Pass undefined to simulate a deb/rpm/pacman install.
+async function withAppImage (value, fn) {
+  const original = process.env.APPIMAGE
+  if (value === undefined) delete process.env.APPIMAGE
+  else process.env.APPIMAGE = value
+  try {
+    return await fn()
+  } finally {
+    if (original === undefined) delete process.env.APPIMAGE
+    else process.env.APPIMAGE = original
+  }
+}
+
 async function loadAutoUpdater ({ isPackaged = true, version = '1.0.0', autoUpdateEnabled = true } = {}) {
   // Electron's native autoUpdater (macOS path).
   const autoUpdater = {
@@ -79,13 +93,26 @@ describe('auto-updater', function () {
     expect(log.info.calledWithMatch(/Dev mode/)).to.equal(true)
   })
 
-  it('skips on Linux (handled by AppImage / distro packaging)', async function () {
-    const { module, autoUpdater, log } = await loadAutoUpdater()
+  it('uses electron-updater on Linux when running as an AppImage', async function () {
+    const { module, autoUpdater, winUpdater } = await loadAutoUpdater()
 
-    withPlatform('linux', () => module.setupAutoUpdater())
+    await withAppImage('/tmp/Peersky.AppImage', () =>
+      withPlatform('linux', () => module.setupAutoUpdater())
+    )
 
     expect(autoUpdater.setFeedURL.called).to.equal(false)
-    expect(log.info.calledWithMatch(/Linux/)).to.equal(true)
+    expect(winUpdater.on.called).to.equal(true)
+  })
+
+  it('skips non-AppImage Linux builds (handled by the distro package manager)', async function () {
+    const { module, winUpdater, log } = await loadAutoUpdater()
+
+    await withAppImage(undefined, () =>
+      withPlatform('linux', () => module.setupAutoUpdater())
+    )
+
+    expect(winUpdater.on.called).to.equal(false)
+    expect(log.info.calledWithMatch(/package manager/)).to.equal(true)
   })
 
   it('skips when disabled in user settings', async function () {
@@ -179,7 +206,7 @@ describe('auto-updater', function () {
       .getCalls()
       .find((c) => c.args[0] === 'update-downloaded').args[1]
 
-    downloadedHandler({}, 'release notes', '2.0.0')
+    await downloadedHandler({}, 'release notes', '2.0.0')
 
     expect(dialog.showMessageBoxSync.calledOnce).to.equal(true)
     expect(autoUpdater.quitAndInstall.calledOnce).to.equal(true)
@@ -195,7 +222,7 @@ describe('auto-updater', function () {
       .getCalls()
       .find((c) => c.args[0] === 'update-downloaded').args[1]
 
-    downloadedHandler({}, 'release notes', '2.0.0')
+    await downloadedHandler({}, 'release notes', '2.0.0')
 
     expect(dialog.showMessageBoxSync.calledOnce).to.equal(true)
     expect(autoUpdater.quitAndInstall.called).to.equal(false)
@@ -266,7 +293,7 @@ describe('auto-updater', function () {
         .getCalls()
         .find((c) => c.args[0] === 'update-downloaded').args[1]
 
-      downloadedHandler({ version: '2.0.0', releaseName: '2.0.0' })
+      await downloadedHandler({ version: '2.0.0', releaseName: '2.0.0' })
 
       expect(dialog.showMessageBoxSync.calledOnce).to.equal(true)
       expect(winUpdater.quitAndInstall.calledOnce).to.equal(true)
@@ -282,7 +309,7 @@ describe('auto-updater', function () {
         .getCalls()
         .find((c) => c.args[0] === 'update-downloaded').args[1]
 
-      downloadedHandler({ version: '2.0.0', releaseName: '2.0.0' })
+      await downloadedHandler({ version: '2.0.0', releaseName: '2.0.0' })
 
       expect(dialog.showMessageBoxSync.calledOnce).to.equal(true)
       expect(winUpdater.quitAndInstall.called).to.equal(false)
