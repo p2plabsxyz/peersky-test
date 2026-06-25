@@ -7,7 +7,7 @@ const UPDATE_HOST = 'https://update.electronjs.org'
 const UPDATE_REPO = 'p2plabsxyz/peersky-test'
 const STARTUP_DELAY_MS = 10000
 const CHECK_INTERVAL_MS = 60 * 60 * 1000
-const FORCE_EXIT_TIMEOUT_MS = 10000
+const FORCE_EXIT_TIMEOUT_MS = 3000
 
 function getFeedUrl () {
   const formatSegment = process.windowsStore ? '/msix' : ''
@@ -25,6 +25,16 @@ function promptRestart (releaseName) {
     detail: 'Restart now to install the update, or choose Later to postpone.'
   })
   return response === 0
+}
+
+function installUpdateAndQuit (quitFn) {
+  app.isQuittingForUpdate = true
+  const hardExit = setTimeout(() => {
+    log.warn('[auto-updater] Hard exit for update install')
+    process.exit(0)
+  }, FORCE_EXIT_TIMEOUT_MS)
+  hardExit.unref?.()
+  quitFn()
 }
 
 // First check after a short startup delay, then on a fixed interval.
@@ -72,13 +82,7 @@ function setupMacUpdater () {
   nativeUpdater.on('update-downloaded', (_event, releaseNotes, releaseName) => {
     log.info('[auto-updater] update-downloaded:', releaseName || releaseNotes)
     if (promptRestart(releaseName || releaseNotes)) {
-      nativeUpdater.quitAndInstall()
-      // If graceful shutdown hangs (p2p services / extensions), force-exit so
-      // Squirrel's ShipIt can swap the bundle and relaunch.
-      setTimeout(() => {
-        log.warn('[auto-updater] Graceful shutdown timed out — force-exiting for update install')
-        app.exit(0)
-      }, FORCE_EXIT_TIMEOUT_MS)
+      installUpdateAndQuit(() => nativeUpdater.quitAndInstall())
     }
   })
 
@@ -127,11 +131,7 @@ function setupWindowsUpdater () {
   autoUpdater.on('update-downloaded', (info) => {
     log.info('[auto-updater] update-downloaded:', info?.version)
     if (promptRestart(info?.releaseName || info?.version)) {
-      autoUpdater.quitAndInstall()
-      setTimeout(() => {
-        log.warn('[auto-updater] Graceful shutdown timed out — force-exiting for update install')
-        app.exit(0)
-      }, FORCE_EXIT_TIMEOUT_MS)
+      installUpdateAndQuit(() => autoUpdater.quitAndInstall())
     }
   })
 
