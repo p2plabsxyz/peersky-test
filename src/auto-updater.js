@@ -7,6 +7,7 @@ const UPDATE_HOST = 'https://update.electronjs.org'
 const UPDATE_REPO = 'p2plabsxyz/peersky-test'
 const STARTUP_DELAY_MS = 10000
 const CHECK_INTERVAL_MS = 60 * 60 * 1000
+const FORCE_EXIT_TIMEOUT_MS = 10000
 
 function getFeedUrl () {
   const formatSegment = process.windowsStore ? '/msix' : ''
@@ -72,6 +73,12 @@ function setupMacUpdater () {
     log.info('[auto-updater] update-downloaded:', releaseName || releaseNotes)
     if (promptRestart(releaseName || releaseNotes)) {
       nativeUpdater.quitAndInstall()
+      // If graceful shutdown hangs (p2p services / extensions), force-exit so
+      // Squirrel's ShipIt can swap the bundle and relaunch.
+      setTimeout(() => {
+        log.warn('[auto-updater] Graceful shutdown timed out — force-exiting for update install')
+        app.exit(0)
+      }, FORCE_EXIT_TIMEOUT_MS)
     }
   })
 
@@ -121,6 +128,10 @@ function setupWindowsUpdater () {
     log.info('[auto-updater] update-downloaded:', info?.version)
     if (promptRestart(info?.releaseName || info?.version)) {
       autoUpdater.quitAndInstall()
+      setTimeout(() => {
+        log.warn('[auto-updater] Graceful shutdown timed out — force-exiting for update install')
+        app.exit(0)
+      }, FORCE_EXIT_TIMEOUT_MS)
     }
   })
 
