@@ -349,10 +349,14 @@ app.on('before-quit', async (event) => {
   }
 
   if (app.isQuittingForUpdate) {
-    // Session was already saved before quitAndInstall. SIGKILL now, since
+    // Session was already saved before quitAndInstall. Hard-exit now, since
     // process.exit hangs on p2p native handles.
     log.info('[quit] Update install — exiting')
-    process.kill(process.pid, 'SIGKILL')
+    if (process.platform === 'win32') {
+      app.exit(0)
+    } else {
+      process.kill(process.pid, 'SIGKILL')
+    }
     return
   }
 
@@ -368,7 +372,7 @@ app.on('before-quit', async (event) => {
   // handles that can keep the process alive even after app.quit(), and Electron
   // stops pumping JS timers once a graceful quit begins. Schedule the hard exit
   // now, while the loop is still healthy, so the process is guaranteed to die
-  // (this is what lets Squirrel/electron-updater's installer swap the bundle).
+  // (this is what lets the installer swap the bundle on update).
   const forceQuit = setTimeout(() => {
     log.warn('[quit] Shutdown watchdog fired — force-exiting')
     process.exit(0)
