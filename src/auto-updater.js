@@ -6,7 +6,7 @@ import os from 'os'
 import settingsManager from './settings-manager.js'
 
 const UPDATE_HOST = 'https://update.electronjs.org'
-const UPDATE_REPO = 'p2plabsxyz/peersky-test'
+const UPDATE_REPO = 'p2plabsxyz/peersky-browser'
 const STARTUP_DELAY_MS = 10000
 const CHECK_INTERVAL_MS = 60 * 60 * 1000
 const FORCE_EXIT_TIMEOUT_MS = 3000
@@ -74,7 +74,7 @@ function setupMacUpdater (saveSession) {
     url: feedURL,
     serverType: 'json',
     headers: {
-      'User-Agent': `peersky-test/${app.getVersion()} (${process.platform}: ${process.arch})`
+      'User-Agent': `peersky-browser/${app.getVersion()} (${process.platform}: ${process.arch})`
     }
   })
 
@@ -121,7 +121,7 @@ function setupMacUpdater (saveSession) {
 // releases, download the installer, and run it.
 function setupNativeNetUpdater (saveSession) {
   const GITHUB_API = `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`
-  const UA = `peersky-test/${app.getVersion()} (${process.platform}: ${process.arch})`
+  const UA = `peersky-browser/${app.getVersion()} (${process.platform}: ${process.arch})`
 
   async function checkAndUpdate () {
     log.info('[auto-updater] checking-for-update')
@@ -176,8 +176,34 @@ function setupNativeNetUpdater (saveSession) {
       const tmpDir = path.join(os.tmpdir(), 'peersky-update')
       fs.mkdirSync(tmpDir, { recursive: true })
       const installerPath = path.join(tmpDir, asset.name)
-      const buffer = Buffer.from(await dlRes.arrayBuffer())
-      fs.writeFileSync(installerPath, buffer)
+
+      // Stream the download to disk instead of buffering the whole file in memory (installers are 300+ MB).
+      const total = asset.size || 0
+      let received = 0
+      let lastLoggedPct = 0
+      const reader = dlRes.body.getReader()
+      const fileStream = fs.createWriteStream(installerPath)
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          fileStream.write(Buffer.from(value))
+          received += value.length
+          if (total) {
+            const pct = Math.floor((received / total) * 100)
+            if (pct >= lastLoggedPct + 10) {
+              lastLoggedPct = pct
+              log.info(`[auto-updater] downloading: ${pct}%`)
+            }
+          }
+        }
+      } finally {
+        fileStream.end()
+        await new Promise((resolve, reject) => {
+          fileStream.on('finish', resolve)
+          fileStream.on('error', reject)
+        })
+      }
       log.info('[auto-updater] update-downloaded:', installerPath)
 
       // Prompt user
@@ -188,7 +214,7 @@ function setupNativeNetUpdater (saveSession) {
             // after the app exits. The installer waits for file locks to
             // release, then replaces the app files.
             const { spawn } = await import('child_process')
-            const child = spawn(installerPath, ['/S'], {
+            const child = spawn(installerPath, ['/S', '--force-run'], {
               detached: true,
               stdio: 'ignore'
             })
