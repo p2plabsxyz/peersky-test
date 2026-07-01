@@ -6,7 +6,7 @@ import os from 'os'
 import settingsManager from './settings-manager.js'
 
 const UPDATE_HOST = 'https://update.electronjs.org'
-const UPDATE_REPO = 'p2plabsxyz/peersky-browser'
+const UPDATE_REPO = 'p2plabsxyz/peersky-test'
 const STARTUP_DELAY_MS = 10000
 const CHECK_INTERVAL_MS = 60 * 60 * 1000
 const FORCE_EXIT_TIMEOUT_MS = 3000
@@ -74,7 +74,7 @@ function setupMacUpdater (saveSession) {
     url: feedURL,
     serverType: 'json',
     headers: {
-      'User-Agent': `peersky-browser/${app.getVersion()} (${process.platform}: ${process.arch})`
+      'User-Agent': `peersky-test/${app.getVersion()} (${process.platform}: ${process.arch})`
     }
   })
 
@@ -121,7 +121,7 @@ function setupMacUpdater (saveSession) {
 // releases, download the installer, and run it.
 function setupNativeNetUpdater (saveSession) {
   const GITHUB_API = `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`
-  const UA = `peersky-browser/${app.getVersion()} (${process.platform}: ${process.arch})`
+  const UA = `peersky-test/${app.getVersion()} (${process.platform}: ${process.arch})`
 
   async function checkAndUpdate () {
     log.info('[auto-updater] checking-for-update')
