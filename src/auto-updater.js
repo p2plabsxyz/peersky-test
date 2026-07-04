@@ -28,14 +28,14 @@ function promptRestart (releaseName) {
   return response === 0
 }
 
-// Force-kill if before-quit never fires. SIGKILL works on macOS/Linux (real
-// POSIX signal); on Windows we use app.exit() which is Electron's hard exit.
+// Force-kill if before-quit never fires. On macOS SIGKILL is safe (Squirrel
+// handles restart). On Windows/Linux we need app.exit() so app.relaunch() fires.
 function forceKill () {
   log.warn('[auto-updater] before-quit did not fire; force-killing')
-  if (process.platform === 'win32') {
-    app.exit(0)
-  } else {
+  if (process.platform === 'darwin') {
     process.kill(process.pid, 'SIGKILL')
+  } else {
+    app.exit(0)
   }
 }
 
@@ -220,11 +220,21 @@ function setupNativeNetUpdater (saveSession) {
             })
             child.unref()
           } else if (process.platform === 'linux') {
-            // Replace the running AppImage with the downloaded one
+            // Replace the running AppImage with the downloaded one.
+            // Linux blocks overwriting a FUSE-mounted file (ETXTBSY),
+            // but allows renaming it — the kernel tracks by inode.
             const currentAppImage = process.env.APPIMAGE
             if (currentAppImage) {
+              const backupPath = currentAppImage + '.bak'
+              try {
+                if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath)
+              } catch (_) { /* ignore */ }
+              fs.renameSync(currentAppImage, backupPath)
               fs.copyFileSync(installerPath, currentAppImage)
               fs.chmodSync(currentAppImage, 0o755)
+              try {
+                fs.unlinkSync(backupPath)
+              } catch (_) { /* may still be mounted; cleaned up next launch */ }
             }
             app.relaunch()
           }
@@ -287,6 +297,15 @@ function setupAutoUpdater (saveSession) {
       log.info('[auto-updater] Skipping: Linux non-AppImage build updates via the system package manager')
       return
     }
+    // Clean up leftover .bak from a previous update that couldn't delete
+    // it while the old AppImage was still FUSE-mounted.
+    try {
+      const bak = process.env.APPIMAGE + '.bak'
+      if (fs.existsSync(bak)) {
+        fs.unlinkSync(bak)
+        log.info('[auto-updater] Cleaned up leftover backup:', bak)
+      }
+    } catch (_) { /* ignore */ }
     setupNativeNetUpdater(saveSession)
     return
   }
