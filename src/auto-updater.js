@@ -228,15 +228,18 @@ function setupNativeNetUpdater (saveSession) {
               const backupPath = currentAppImage + '.bak'
               try {
                 if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath)
-              } catch (_) { /* ignore */ }
+              } catch (_) {}
               fs.renameSync(currentAppImage, backupPath)
               fs.copyFileSync(installerPath, currentAppImage)
               fs.chmodSync(currentAppImage, 0o755)
               try {
                 fs.unlinkSync(backupPath)
-              } catch (_) { /* may still be mounted; cleaned up next launch */ }
+              } catch (_) {}
+              // app.relaunch() doesn't work reliably with FUSE-mounted AppImages.
+              // Spawn the new AppImage as a detached process instead.
+              const { spawn } = await import('child_process')
+              spawn(currentAppImage, [], { detached: true, stdio: 'ignore' }).unref()
             }
-            app.relaunch()
           }
           app.quit()
         }, saveSession)
@@ -305,7 +308,7 @@ function setupAutoUpdater (saveSession) {
         fs.unlinkSync(bak)
         log.info('[auto-updater] Cleaned up leftover backup:', bak)
       }
-    } catch (_) { /* ignore */ }
+    } catch (_) {}
     setupNativeNetUpdater(saveSession)
     return
   }
