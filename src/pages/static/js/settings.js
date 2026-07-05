@@ -401,6 +401,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const resetP2PBtn = document.getElementById('reset-p2p')
 
   const autoUpdateEnabled = document.getElementById('auto-update-enabled')
+  const checkForUpdatesBtn = document.getElementById('check-for-updates')
   const memorySaverEnabled = document.getElementById('memory-saver-enabled')
   const memoryExclusionInput = document.getElementById('memory-exclusion-input')
   const addExclusionBtn = document.getElementById('add-exclusion-btn')
@@ -659,6 +660,22 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   autoUpdateEnabled?.addEventListener('change', async (e) => {
     await saveSettingToBackend('autoUpdateEnabled', e.target.checked)
+  })
+
+  checkForUpdatesBtn?.addEventListener('click', async () => {
+    if (!settingsAPI?.settings?.checkForUpdates) return
+    try {
+      checkForUpdatesBtn.disabled = true
+      checkForUpdatesBtn.textContent = 'Checking...'
+      await settingsAPI.settings.checkForUpdates()
+      showSettingsSavedMessage('Update check triggered. If a new version is available, you will be prompted.', 'success')
+    } catch (err) {
+      console.error(err)
+      showSettingsSavedMessage(`Update check failed: ${err.message}`, 'error')
+    } finally {
+      checkForUpdatesBtn.disabled = false
+      checkForUpdatesBtn.textContent = 'Check for Updates'
+    }
   })
 
   memorySaverEnabled?.addEventListener('change', async (e) => {

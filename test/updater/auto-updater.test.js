@@ -174,7 +174,7 @@ describe('auto-updater', function () {
     ])
   })
 
-  it('checks after a 10s startup delay, then on a 1h interval', async function () {
+  it('checks after a 10s startup delay, then on a 24h interval', async function () {
     clock = sinon.useFakeTimers()
     const { module, autoUpdater } = await loadAutoUpdater()
 
@@ -186,10 +186,10 @@ describe('auto-updater', function () {
     clock.tick(10000)
     expect(autoUpdater.checkForUpdates.callCount).to.equal(1)
 
-    clock.tick(60 * 60 * 1000)
+    clock.tick(24 * 60 * 60 * 1000)
     expect(autoUpdater.checkForUpdates.callCount).to.equal(2)
 
-    clock.tick(60 * 60 * 1000)
+    clock.tick(24 * 60 * 60 * 1000)
     expect(autoUpdater.checkForUpdates.callCount).to.equal(3)
   })
 
@@ -262,7 +262,7 @@ describe('auto-updater', function () {
       expect(netFetch.called).to.equal(true)
     })
 
-    it('checks after a 10s startup delay, then on a 1h interval', async function () {
+    it('checks after a 10s startup delay, then on a 24h interval', async function () {
       clock = sinon.useFakeTimers()
       const { module, netFetch } = await loadAutoUpdater()
 
@@ -273,7 +273,7 @@ describe('auto-updater', function () {
       await clock.tickAsync(10000)
       expect(netFetch.callCount).to.equal(1)
 
-      await clock.tickAsync(60 * 60 * 1000)
+      await clock.tickAsync(24 * 60 * 60 * 1000)
       expect(netFetch.callCount).to.equal(2)
     })
 

@@ -8,8 +8,12 @@ import settingsManager from './settings-manager.js'
 const UPDATE_HOST = 'https://update.electronjs.org'
 const UPDATE_REPO = 'p2plabsxyz/peersky-test'
 const STARTUP_DELAY_MS = 10000
-const CHECK_INTERVAL_MS = 60 * 60 * 1000
+const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
 const FORCE_EXIT_TIMEOUT_MS = 3000
+
+// Holds a reference to the check function so it can be triggered manually
+// from the Settings UI (via IPC). Set by setupMacUpdater / setupNativeNetUpdater.
+let _manualCheck = null
 
 function getFeedUrl () {
   const formatSegment = process.windowsStore ? '/msix' : ''
@@ -105,14 +109,14 @@ function setupMacUpdater (saveSession) {
     log.error('[auto-updater] error:', err?.message || err)
   })
 
-  scheduleChecks(() => {
-    // Native checkForUpdates() returns void, so guard with try/catch.
+  _manualCheck = () => {
     try {
       nativeUpdater.checkForUpdates()
     } catch (err) {
       log.error('[auto-updater] checkForUpdates failed:', err?.message || err)
     }
-  })
+  }
+  scheduleChecks(_manualCheck)
 }
 
 // Windows (NSIS) and Linux: electron-updater uses Node.js HTTP (c-ares DNS)
@@ -249,7 +253,8 @@ function setupNativeNetUpdater (saveSession) {
     }
   }
 
-  scheduleChecks(checkAndUpdate)
+  _manualCheck = checkAndUpdate
+  scheduleChecks(_manualCheck)
 }
 
 // Dev-only: run the popup -> quit -> relaunch path without a build or real
@@ -276,7 +281,7 @@ function setupAutoUpdater (saveSession) {
       return
     }
     log.info('[auto-updater] Dev mode: auto-update checks run only in packaged ' +
-      'builds (1h interval after a 10s delay). Set PEERSKY_TEST_UPDATE=1 to preview the popup.')
+      'builds (24h interval after a 10s delay). Set PEERSKY_TEST_UPDATE=1 to preview the popup.')
     return
   }
 
@@ -316,4 +321,13 @@ function setupAutoUpdater (saveSession) {
   setupMacUpdater(saveSession)
 }
 
-export { setupAutoUpdater }
+function checkForUpdatesNow () {
+  if (_manualCheck) {
+    log.info('[auto-updater] Manual check triggered from Settings')
+    _manualCheck()
+  } else {
+    log.warn('[auto-updater] Manual check: updater not initialized')
+  }
+}
+
+export { setupAutoUpdater, checkForUpdatesNow }
