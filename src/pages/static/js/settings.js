@@ -667,8 +667,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       checkForUpdatesBtn.disabled = true
       checkForUpdatesBtn.textContent = 'Checking...'
-      await settingsAPI.settings.checkForUpdates()
-      showSettingsSavedMessage('Update check triggered. If a new version is available, you will be prompted.', 'success')
+      const status = await settingsAPI.settings.checkForUpdates()
+      if (status === 'up-to-date') {
+        showSettingsSavedMessage('You are on the latest version!', 'success')
+      } else if (status === 'update-available') {
+        showSettingsSavedMessage('Update is ready. Follow the prompt to restart.', 'success')
+      } else if (status === 'error' || status === 'timeout') {
+        showSettingsSavedMessage('Could not check for updates. Please try again later.', 'error')
+      } else {
+        showSettingsSavedMessage('Update check triggered.', 'success')
+      }
     } catch (err) {
       console.error(err)
       showSettingsSavedMessage(`Update check failed: ${err.message}`, 'error')

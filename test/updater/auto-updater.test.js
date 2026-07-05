@@ -135,13 +135,19 @@ describe('auto-updater', function () {
     expect(log.info.calledWithMatch(/package manager/)).to.equal(true)
   })
 
-  it('skips when disabled in user settings', async function () {
+  it('skips periodic checks when disabled in user settings but initializes updater', async function () {
+    clock = sinon.useFakeTimers()
     const { module, autoUpdater, log } = await loadAutoUpdater({ autoUpdateEnabled: false })
 
     withPlatform('darwin', () => module.setupAutoUpdater())
 
-    expect(autoUpdater.setFeedURL.called).to.equal(false)
-    expect(log.info.calledWithMatch(/disabled in user settings/)).to.equal(true)
+    // Updater is initialized (manual button works)
+    expect(autoUpdater.setFeedURL.called).to.equal(true)
+    expect(log.info.calledWithMatch(/manual check still available/)).to.equal(true)
+
+    // But no periodic checks are scheduled
+    clock.tick(10000)
+    expect(autoUpdater.checkForUpdates.called).to.equal(false)
   })
 
   it('configures a JSON feed URL pointing at the configured repo and version', async function () {

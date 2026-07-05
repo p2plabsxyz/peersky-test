@@ -15,6 +15,11 @@ const FORCE_EXIT_TIMEOUT_MS = 3000
 // from the Settings UI (via IPC). Set by setupMacUpdater / setupNativeNetUpdater.
 let _manualCheck = null
 
+// When an update has been downloaded but the user clicked "Later", we store
+// the install callback + release name so the Settings button can re-show
+// the restart prompt without re-downloading.
+let _pendingUpdate = null
+
 function getFeedUrl () {
   const formatSegment = process.windowsStore ? '/msix' : ''
   return `${UPDATE_HOST}/${UPDATE_REPO}/${process.platform}-${process.arch}${formatSegment}/${app.getVersion()}`
@@ -100,8 +105,14 @@ function setupMacUpdater (saveSession) {
 
   nativeUpdater.on('update-downloaded', async (_event, releaseNotes, releaseName) => {
     log.info('[auto-updater] update-downloaded:', releaseName || releaseNotes)
-    if (promptRestart(releaseName || releaseNotes)) {
+    const label = releaseName || releaseNotes
+    if (promptRestart(label)) {
       await installUpdateAndQuit(() => nativeUpdater.quitAndInstall(), saveSession)
+    } else {
+      _pendingUpdate = {
+        label,
+        install: () => installUpdateAndQuit(() => nativeUpdater.quitAndInstall(), saveSession)
+      }
     }
   })
 
@@ -116,7 +127,6 @@ function setupMacUpdater (saveSession) {
       log.error('[auto-updater] checkForUpdates failed:', err?.message || err)
     }
   }
-  scheduleChecks(_manualCheck)
 }
 
 // Windows (NSIS) and Linux: electron-updater uses Node.js HTTP (c-ares DNS)
@@ -211,7 +221,7 @@ function setupNativeNetUpdater (saveSession) {
       log.info('[auto-updater] update-downloaded:', installerPath)
 
       // Prompt user
-      if (promptRestart(`v${latest}`)) {
+      const doInstall = async () => {
         await installUpdateAndQuit(async () => {
           if (process.platform === 'win32') {
             // Launch the NSIS installer as a detached process so it survives
@@ -248,13 +258,17 @@ function setupNativeNetUpdater (saveSession) {
           app.quit()
         }, saveSession)
       }
+      if (promptRestart(`v${latest}`)) {
+        await doInstall()
+      } else {
+        _pendingUpdate = { label: `v${latest}`, install: doInstall }
+      }
     } catch (err) {
       log.error('[auto-updater] checkForUpdates failed:', err?.message || err)
     }
   }
 
   _manualCheck = checkAndUpdate
-  scheduleChecks(_manualCheck)
 }
 
 // Dev-only: run the popup -> quit -> relaunch path without a build or real
@@ -285,19 +299,13 @@ function setupAutoUpdater (saveSession) {
     return
   }
 
-  if (settingsManager.settings.autoUpdateEnabled === false) {
-    log.info('[auto-updater] Skipping: disabled in user settings')
-    return
-  }
-
   log.transports.file.level = 'info'
 
+  // Always initialize the updater so the manual "Check for Updates" button
+  // works regardless of the autoUpdateEnabled setting.
   if (process.platform === 'win32') {
     setupNativeNetUpdater(saveSession)
-    return
-  }
-
-  if (process.platform === 'linux') {
+  } else if (process.platform === 'linux') {
     // Only the AppImage build can auto-update. The deb/rpm/pacman/apk builds
     // are owned by the system package manager — those users update through
     // their distro. process.env.APPIMAGE is set only when running as an AppImage.
@@ -315,19 +323,61 @@ function setupAutoUpdater (saveSession) {
       }
     } catch (_) {}
     setupNativeNetUpdater(saveSession)
+  } else {
+    setupMacUpdater(saveSession)
+  }
+
+  // Only schedule periodic checks if auto-updates are enabled.
+  // The manual button (checkForUpdatesNow) still works either way.
+  if (settingsManager.settings.autoUpdateEnabled === false) {
+    log.info('[auto-updater] Periodic checks disabled in user settings (manual check still available)')
     return
   }
 
-  setupMacUpdater(saveSession)
+  if (_manualCheck) {
+    scheduleChecks(_manualCheck)
+  }
 }
 
-function checkForUpdatesNow () {
-  if (_manualCheck) {
-    log.info('[auto-updater] Manual check triggered from Settings')
-    _manualCheck()
-  } else {
-    log.warn('[auto-updater] Manual check: updater not initialized')
+async function checkForUpdatesNow () {
+  if (_pendingUpdate) {
+    log.info('[auto-updater] Manual check: update already downloaded, re-showing prompt')
+    if (promptRestart(_pendingUpdate.label)) {
+      await _pendingUpdate.install()
+    }
+    return 'update-available'
   }
+  if (!_manualCheck) {
+    log.warn('[auto-updater] Manual check: updater not initialized')
+    return 'not-initialized'
+  }
+  log.info('[auto-updater] Manual check triggered from Settings')
+
+  // On macOS the native updater is event-based; wait for the outcome.
+  if (process.platform === 'darwin') {
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => resolve('timeout'), 30000)
+      const cleanup = (result) => {
+        clearTimeout(timeout)
+        nativeUpdater.removeListener('update-not-available', onNotAvail)
+        nativeUpdater.removeListener('update-downloaded', onDownloaded)
+        nativeUpdater.removeListener('error', onError)
+        resolve(result)
+      }
+      const onNotAvail = () => cleanup('up-to-date')
+      const onDownloaded = () => cleanup('update-available')
+      const onError = () => cleanup('error')
+      nativeUpdater.once('update-not-available', onNotAvail)
+      nativeUpdater.once('update-downloaded', onDownloaded)
+      nativeUpdater.once('error', onError)
+      _manualCheck()
+    })
+  }
+
+  // Windows/Linux: checkAndUpdate is async and shows the prompt itself.
+  // We can detect the outcome by checking _pendingUpdate after it runs.
+  await _manualCheck()
+  return _pendingUpdate ? 'update-available' : 'up-to-date'
 }
 
 export { setupAutoUpdater, checkForUpdatesNow }

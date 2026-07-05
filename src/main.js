@@ -329,7 +329,7 @@ app.whenReady().then(async () => {
   })
 
   ipcMain.handle('check-for-updates', () => {
-    checkForUpdatesNow()
+    return checkForUpdatesNow()
   })
 })
 
