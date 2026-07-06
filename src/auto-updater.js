@@ -224,13 +224,17 @@ function setupNativeNetUpdater (saveSession) {
       const doInstall = async () => {
         await installUpdateAndQuit(async () => {
           if (process.platform === 'win32') {
-            // Launch the NSIS installer as a detached process so it survives
-            // after the app exits. The installer waits for file locks to
-            // release, then replaces the app files.
+            // Launch the NSIS installer via a wrapper script that waits for
+            // this process to exit first, avoiding "Failed to uninstall old
+            // application files" errors from file locks.
             const { spawn } = await import('child_process')
-            const child = spawn(installerPath, ['/S', '--force-run'], {
+            const batPath = path.join(os.tmpdir(), 'peersky-update', 'install.bat')
+            const batContent = `@echo off\r\ntimeout /t 3 /nobreak > nul\r\n"${installerPath}" /S --force-run\r\n`
+            fs.writeFileSync(batPath, batContent)
+            const child = spawn('cmd.exe', ['/c', batPath], {
               detached: true,
-              stdio: 'ignore'
+              stdio: 'ignore',
+              windowsHide: true
             })
             child.unref()
           } else if (process.platform === 'linux') {
@@ -366,7 +370,16 @@ async function checkForUpdatesNow () {
       }
       const onNotAvail = () => cleanup('up-to-date')
       const onDownloaded = () => cleanup('update-available')
-      const onError = () => cleanup('error')
+      const onError = (err) => {
+        // Squirrel.Mac fires an error (instead of update-not-available) when
+        // update.electronjs.org returns 204 No Content (i.e. already on latest).
+        const msg = err?.message || String(err)
+        if (msg.includes('invalid response') || msg.includes('No update available')) {
+          cleanup('up-to-date')
+        } else {
+          cleanup('error')
+        }
+      }
       nativeUpdater.once('update-not-available', onNotAvail)
       nativeUpdater.once('update-downloaded', onDownloaded)
       nativeUpdater.once('error', onError)
