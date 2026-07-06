@@ -224,33 +224,27 @@ function setupNativeNetUpdater (saveSession) {
       const doInstall = async () => {
         await installUpdateAndQuit(async () => {
           if (process.platform === 'win32') {
-            // Launch NSIS installer via a wrapper script that polls until this
+            // Launch NSIS installer via a hidden VBScript that polls until this
             // process exits, avoiding file-lock errors during uninstall.
             const { spawn } = await import('child_process')
             const pid = process.pid
-            const batPath = path.join(os.tmpdir(), 'peersky-update', 'install.bat')
-            const batContent = [
-              '@echo off',
-              `set PID=${pid}`,
-              'set /a TRIES=0',
-              ':waitloop',
-              'tasklist /FI "PID eq %PID%" 2>nul | find "%PID%" >nul',
-              'if errorlevel 1 goto :install',
-              'set /a TRIES+=1',
-              'if %TRIES% GEQ 15 goto :install',
-              'timeout /t 2 /nobreak > nul',
-              'goto :waitloop',
-              ':install',
-              'timeout /t 2 /nobreak > nul',
-              `"${installerPath}" /S --force-run`
+            const vbsPath = path.join(os.tmpdir(), 'peersky-update', 'install.vbs')
+            const vbsContent = [
+              'Set wmi = GetObject("winmgmts:")',
+              `pid = "${pid}"`,
+              'For i = 0 To 29',
+              '  Set procs = wmi.ExecQuery("SELECT ProcessId FROM Win32_Process WHERE ProcessId=" & pid)',
+              '  If procs.Count = 0 Then Exit For',
+              '  WScript.Sleep 1000',
+              'Next',
+              'WScript.Sleep 2000',
+              `CreateObject("WScript.Shell").Run """${installerPath}""" & " /S --force-run", 0, False`
             ].join('\r\n') + '\r\n'
-            fs.writeFileSync(batPath, batContent)
-            const child = spawn('cmd.exe', ['/c', batPath], {
+            fs.writeFileSync(vbsPath, vbsContent)
+            spawn('wscript.exe', [vbsPath], {
               detached: true,
-              stdio: 'ignore',
-              windowsHide: true
-            })
-            child.unref()
+              stdio: 'ignore'
+            }).unref()
           } else if (process.platform === 'linux') {
             // Replace the running AppImage with the downloaded one.
             // Linux blocks overwriting a FUSE-mounted file (ETXTBSY),
