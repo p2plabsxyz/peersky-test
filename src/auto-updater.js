@@ -9,7 +9,7 @@ const UPDATE_HOST = 'https://update.electronjs.org'
 const UPDATE_REPO = 'p2plabsxyz/peersky-test'
 const STARTUP_DELAY_MS = 10000
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
-const FORCE_EXIT_TIMEOUT_MS = 3000
+const FORCE_EXIT_TIMEOUT_MS = 6000
 
 // Holds a reference to the check function so it can be triggered manually
 // from the Settings UI (via IPC). Set by setupMacUpdater / setupNativeNetUpdater.
@@ -224,12 +224,26 @@ function setupNativeNetUpdater (saveSession) {
       const doInstall = async () => {
         await installUpdateAndQuit(async () => {
           if (process.platform === 'win32') {
-            // Launch the NSIS installer via a wrapper script that waits for
-            // this process to exit first, avoiding "Failed to uninstall old
-            // application files" errors from file locks.
+            // Launch NSIS installer via a wrapper script that polls until this
+            // process exits, avoiding file-lock errors during uninstall.
             const { spawn } = await import('child_process')
+            const pid = process.pid
             const batPath = path.join(os.tmpdir(), 'peersky-update', 'install.bat')
-            const batContent = `@echo off\r\ntimeout /t 3 /nobreak > nul\r\n"${installerPath}" /S --force-run\r\n`
+            const batContent = [
+              '@echo off',
+              `set PID=${pid}`,
+              'set /a TRIES=0',
+              ':waitloop',
+              'tasklist /FI "PID eq %PID%" 2>nul | find "%PID%" >nul',
+              'if errorlevel 1 goto :install',
+              'set /a TRIES+=1',
+              'if %TRIES% GEQ 15 goto :install',
+              'timeout /t 2 /nobreak > nul',
+              'goto :waitloop',
+              ':install',
+              'timeout /t 2 /nobreak > nul',
+              `"${installerPath}" /S --force-run`
+            ].join('\r\n') + '\r\n'
             fs.writeFileSync(batPath, batContent)
             const child = spawn('cmd.exe', ['/c', batPath], {
               detached: true,
